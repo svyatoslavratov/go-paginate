@@ -1,0 +1,21 @@
+name: Feature request
+description: A feature of nestjs-paginate that is missing, or a new one.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you need?
+      description: The use case, and the query a client would send.
+    validations:
+      required: true
+  - type: input
+    id: nestjs
+    attributes:
+      label: nestjs-paginate equivalent
+      description: A link to the nestjs-paginate docs or code, if the feature exists there.
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How the config or the query could look.

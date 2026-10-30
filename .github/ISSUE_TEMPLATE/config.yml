@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/svyatoslavratov/go-paginate/security/advisories/new
+    about: Report security problems privately, not in an issue.
+  - name: Migrating from nestjs-paginate
+    url: https://github.com/svyatoslavratov/go-paginate/blob/main/docs/migrating-from-nestjs.md
+    about: Every nestjs-paginate feature in TypeScript and in Go.
