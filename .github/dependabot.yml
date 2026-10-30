@@ -1,7 +1,7 @@
 version: 2
 updates:
   - package-ecosystem: gomod
-    directory: /
+    directories: ["/", "/examples"]
     schedule:
       interval: weekly
     cooldown:
@@ -17,4 +17,13 @@ updates:
       default-days: 14
     groups:
       github-actions:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directory: /examples/catalog
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      docker-images:
         patterns: ["*"]

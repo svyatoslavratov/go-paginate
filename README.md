@@ -15,6 +15,11 @@ Pagination, sorting, search and filtering for Go list endpoints, inspired by
 `links`. A frontend written for nestjs-paginate can call a Go backend without changes, within the
 [differences](docs/nestjs-compatibility.md) listed against nestjs-paginate 16.0.1.
 
+**[Live demo](https://svyatoslavratov.github.io/go-paginate/)**: every filter, sort and answer
+format on a real table, in your browser (Go compiled to WebAssembly, Postgres in
+[PGlite](https://pglite.dev)). The same demo on chi, GORM and Postgres starts with
+`docker compose up` in [examples/catalog](examples/catalog).
+
 - **Two executors, one SQL.** `gormx.Paginate` runs on GORM, `squirrelx.Paginate` runs on squirrel and pgx.
   Both render conditions with the same code, so they behave the same.
 - **Filter expressions.** `filter=(status=$in:paid,shipped OR total=$gte:1000) AND NOT comment=$null`,
@@ -30,6 +35,23 @@ Pagination, sorting, search and filtering for Go list endpoints, inspired by
   between pages.
 - **A GORM builder.** It takes column names from the model and API names from the DTO, so a
   renamed field breaks the build instead of a request.
+
+## Contents
+
+- [Install](#install)
+- [Quick start](#quick-start)
+- [How a request flows](#how-a-request-flows)
+- [Query syntax](#query-syntax)
+- [Filters](#filters)
+- [Configuration](#configuration)
+- [Errors](#errors)
+- [nestjs-paginate](#nestjs-paginate)
+- [Performance](#performance)
+- [Status and versioning](#status-and-versioning)
+- [FAQ](#faq)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Install
 
@@ -142,6 +164,31 @@ nestjs-paginate way:
 }
 ```
 
+## How a request flows
+
+```mermaid
+flowchart LR
+    http["GET /users?…"] -- "ParseRequest" --> req["Request<br/>API field names"]
+    req -- "Prepare(req, cfg)" --> query["Query<br/>WHERE, ORDER BY, LIMIT"]
+    query -- "executor" --> db[("Postgres<br/>count + page")]
+    db -- "NewResponse" --> resp["Response<br/>data, meta, links"]
+    req -. "unknown field, bad value" .-> bad["400"]
+    db -. "value of the wrong type" .-> bad
+```
+
+1. **Parse.** `paginate.ParseRequest` (net/http), `fasthttpx.ParseRequest` or `paginate.ParseQuery`
+   (any router) reads the query string into a `Request`. Only a malformed `sortBy` fails here.
+2. **Prepare.** `paginate.Prepare` checks the request against the `Config`: fields and operators
+   against the allowlists, sizes against the caps. It maps API fields to columns and renders a
+   `Query`: SQL conditions with bind parameters, the `ORDER BY` with the tie-breaker, the page.
+3. **Execute.** An executor adds the `Query` to your base query and runs the count and the page.
+   `gormx.Paginate` and `squirrelx.Paginate` do steps 2–4 in one call; an executor of your own takes
+   a few lines ([example](docs/use-cases/custom-executor.md)).
+4. **Answer.** `paginate.NewResponse` builds `{data, meta}` and, with `FormatNestJS`, the links.
+
+A mistake of the client wraps `ErrInvalidRequest` at any step, a value Postgres rejects for its type
+included, so one `errors.Is` tells the handler to answer 400.
+
 ## Query syntax
 
 | Parameter | Example | Meaning |
@@ -235,11 +282,69 @@ Compared with nestjs-paginate **16.0.1**:
 The full [comparison](docs/nestjs-compatibility.md) and a
 [migration guide](docs/migrating-from-nestjs.md) with every feature in TypeScript and in Go.
 
+## Performance
+
+The library's work takes microseconds; the database's takes milliseconds. On an Apple M3 Pro,
+parsing a typical request (a page, two sort keys, a search and four filters) takes about 1.2 µs and
+`Prepare` about 4.6 µs. Against code written by hand for the same request, the library costs the
+same with squirrel and about 6 µs more with GORM; end to end on Postgres the two are within noise.
+The largest request the default caps admit takes tens of microseconds.
+[docs/benchmarks.md](docs/benchmarks.md) has the tables and how to run them.
+
+## Status and versioning
+
+The first release is v0.1.0. Until v1.0.0 a minor release (v0.x.0) may change the API; every change
+is in the [changelog](CHANGELOG.md) with upgrade notes, and patch releases (v0.x.y) only fix bugs.
+CI runs [gorelease](https://pkg.go.dev/golang.org/x/exp/cmd/gorelease) on every pull request, so an
+incompatible change cannot land unnoticed.
+
+| | Versions |
+|---|---|
+| Go | 1.26 and newer; CI tests the two latest releases |
+| Postgres | 13–18, each one in CI |
+| GORM | gorm.io/gorm v1.31.2+, gorm.io/driver/postgres v1.6.3+ |
+| squirrel, pgx | v1.5.4+, v5.11.0+ |
+| fasthttp | v1.75.0+ |
+| nestjs-paginate (parity) | 16.0.1 |
+
+## FAQ
+
+**Do I need GORM?** No. The root package has no dependencies; `squirrelx` runs on squirrel and pgx,
+and any other executor can call `Prepare` itself ([example](docs/use-cases/custom-executor.md)).
+
+**Is it safe to put user input into SQL like this?** Columns come only from the config, every value
+is a bind parameter, `%` and `_` are escaped, and requests are capped in size. Fuzz tests in CI
+check that whatever the input, values end up only in the parameters. See
+[security](docs/security.md).
+
+**MySQL, SQLite?** Not yet: the SQL is written for Postgres (`ILIKE`, `@>`, `NULLS LAST`, casts).
+
+**How do I answer with DTOs instead of models?** Map the rows and keep the meta: it carries the
+format and the links.
+
+```go
+page, err := gormx.Paginate[User](ctx, *req, cfg, db.Model(&User{}))
+if err != nil {
+	return err
+}
+writeJSON(w, http.StatusOK, paginate.Response[UserDTO]{Data: toDTOs(page.Data), Meta: page.Meta})
+```
+
+**Why is an unknown field a 400?** `NewConfig` sets `StrictValidate`, so a typo in a frontend shows
+up at once instead of returning unfiltered rows. Set it to `false` for nestjs-paginate's behavior.
+
+**Cursor (keyset) pagination?** Not supported. Offset pagination with a unique tie-breaker gives
+stable pages; on deep pages of large tables keyset pagination is faster.
+
+**How do I move an endpoint from nestjs-paginate?** The
+[migration guide](docs/migrating-from-nestjs.md) shows every feature in TypeScript and in Go.
+
 ## Documentation
 
 - [Query syntax](docs/query-syntax.md), [filters](docs/filters.md), [sorting and tie-breaker](docs/sorting.md)
 - [Configuration](docs/configuration.md), [security](docs/security.md)
 - [Comparison with nestjs-paginate](docs/nestjs-compatibility.md), [migrating from nestjs-paginate](docs/migrating-from-nestjs.md)
+- [Benchmarks](docs/benchmarks.md), [the demo app](examples/catalog)
 - Use cases: [net/http + GORM](docs/use-cases/chi-gorm.md), [GORM builder](docs/use-cases/gorm-builder.md),
   [squirrel + pgx and fasthttp](docs/use-cases/squirrel-pgx.md), [joins, aliases, GROUP BY](docs/use-cases/joins-and-aliases.md),
   [exports and counts](docs/use-cases/exports-and-counts.md), [gRPC and other transports](docs/use-cases/grpc.md),
@@ -249,8 +354,9 @@ The full [comparison](docs/nestjs-compatibility.md) and a
 ## Contributing
 
 Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Tests run with
-`make test`, and against a disposable Postgres with `make test-pg`. Report vulnerabilities
-privately, as [SECURITY.md](SECURITY.md) describes.
+`make test`, and against a disposable Postgres with `make test-pg`; `make bench` and `make fuzz` run
+the benchmarks and the fuzz tests, `make demo-up` the demo. Report vulnerabilities privately, as
+[SECURITY.md](SECURITY.md) describes.
 
 ## License
 

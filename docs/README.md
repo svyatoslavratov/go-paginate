@@ -24,3 +24,8 @@ Use cases:
 - [OpenAPI](use-cases/openapi.md): documenting the parameters and the answer.
 - [A custom executor](use-cases/custom-executor.md): `paginate.Prepare` on database/sql or any other library.
 - [Testing a config](use-cases/testing.md): `Validate`, builder errors and SQL snapshots.
+
+Performance and examples:
+
+- [Benchmarks](benchmarks.md): the cost of parsing and `Prepare`, the library against hand-written code, end to end on Postgres.
+- [The demo app](../examples/catalog): chi + GORM + Postgres in Docker, and the same page in the browser.

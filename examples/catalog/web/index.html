@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>go-paginate demo</title>
+  <meta name="demo-engine" content="server">
+  <meta name="description" content="Pagination, sorting, search and filters for Go APIs with the query language of nestjs-paginate: a live demo.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232563eb'/%3E%3Cpath d='M4 5h8M4 8h8M4 11h5' stroke='white' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <h1>go-paginate</h1>
+      <p>nestjs-paginate's query language for Go: every filter, sort and format on a real table.</p>
+    </div>
+    <nav class="links">
+      <span id="engine" class="engine">Starting…</span>
+      <a href="https://github.com/svyatoslavratov/go-paginate">GitHub</a>
+      <a href="https://github.com/svyatoslavratov/go-paginate/blob/main/docs/query-syntax.md">Query syntax</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="card controls" aria-label="Query">
+      <div class="grid">
+        <label class="field grow">
+          <span>search</span>
+          <input id="search" type="search" placeholder="red lamp — every word must match" autocomplete="off">
+        </label>
+        <fieldset class="field" id="searchBy">
+          <legend>searchBy</legend>
+        </fieldset>
+        <label class="field">
+          <span>limit</span>
+          <select id="limit">
+            <option value="5">5</option>
+            <option value="10" selected>10</option>
+            <option value="20">20</option>
+            <option value="50">50</option>
+            <option value="0">0 — count only</option>
+            <option value="-1">-1 — every row</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>answer</span>
+          <select id="format">
+            <option value="nestjs">nestjs-paginate</option>
+            <option value="default">go-paginate default</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="filters">
+        <div class="filters-head">
+          <h2>filter.&lt;field&gt;</h2>
+          <button type="button" id="addFilter" class="ghost">+ Add filter</button>
+        </div>
+        <div id="filters"></div>
+      </div>
+
+      <label class="field expression">
+        <span>filter= <small>AND · OR · NOT · ( ) · "quoted values"</small></span>
+        <input id="expression" placeholder='(category=$in:lighting,decor OR price=$lt:20) AND NOT name=$sw:"Ember"' autocomplete="off" spellcheck="false">
+      </label>
+
+      <div class="presets">
+        <span>Try:</span>
+        <div id="presets" class="chips"></div>
+        <button type="button" id="reset" class="ghost">Reset</button>
+      </div>
+    </section>
+
+    <section id="status" class="status" aria-live="polite"></section>
+
+    <section class="card table-card">
+      <div class="table-wrap">
+        <table id="table">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <nav id="pager" class="pager" aria-label="Pages"></nav>
+      <p class="hint">Click a column to sort, Shift+click to add a sort key. The tie-breaker (<code>id</code>) keeps pages stable.</p>
+    </section>
+
+    <section class="card debug">
+      <h2>Request</h2>
+      <pre id="request" class="code"></pre>
+      <h2>SQL</h2>
+      <pre id="sql" class="code"></pre>
+      <details>
+        <summary>meta and links of the answer</summary>
+        <pre id="meta" class="code"></pre>
+      </details>
+    </section>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

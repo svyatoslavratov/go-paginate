@@ -1,0 +1,31 @@
+# The demo on chi, GORM and Postgres in one command, from this directory:
+#
+#   docker compose up --build
+#
+# Then open http://localhost:8080. Another port: PORT=9000 docker compose up --build.
+name: go-paginate-demo
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: catalog
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d catalog"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  app:
+    build:
+      context: ../..
+      dockerfile: examples/catalog/Dockerfile
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/catalog?sslmode=disable
+    ports:
+      - "${PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy

@@ -30,5 +30,9 @@ The first release, to be tagged v0.1.0.
   and `Config.Validate`.
 - [Comparison with nestjs-paginate 16.0.1](docs/nestjs-compatibility.md) and a
   [migration guide](docs/migrating-from-nestjs.md).
+- The demo app in [examples/catalog](examples/catalog): chi, GORM and Postgres with
+  `docker compose up`, and the same page on GitHub Pages, in the browser (Go WebAssembly and PGlite).
+- Fuzz tests of the parsers, benchmarks against hand-written code, and CI on Postgres 13 to 18 with
+  gorelease checks of the API.
 
 [Unreleased]: https://github.com/svyatoslavratov/go-paginate/commits/main

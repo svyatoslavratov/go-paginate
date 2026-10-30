@@ -1,0 +1,45 @@
+name: Benchmarks
+
+on:
+  pull_request:
+    paths:
+      - "**.go"
+      - go.mod
+      - go.sum
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+      - name: Benchmark the pull request
+        run: go test -run='^$' -bench=. -benchmem -count=6 ./... | tee "$RUNNER_TEMP/head.txt"
+      - name: Benchmark the base branch
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+          cd "$RUNNER_TEMP/base"
+          go test -run='^$' -bench=. -benchmem -count=6 ./... | tee "$RUNNER_TEMP/base.txt" || true
+      - name: Compare
+        run: |
+          {
+            echo "## Benchmarks: base → pull request"
+            echo '```'
+            go run golang.org/x/perf/cmd/benchstat@v0.0.0-20261009192801-be2c69fb417e "$RUNNER_TEMP/base.txt" "$RUNNER_TEMP/head.txt"
+            echo '```'
+            echo "Shared runners are noisy: treat changes under about 10% as noise."
+          } >> "$GITHUB_STEP_SUMMARY"

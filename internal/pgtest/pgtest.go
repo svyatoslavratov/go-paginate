@@ -56,7 +56,7 @@ func (Item) TableName() string { return "items" }
 
 // Open creates a schema with the fixture and returns GORM and pgx handles bound to it; the schema
 // is dropped when the test ends.
-func Open(t *testing.T) (*gorm.DB, *pgxpool.Pool) {
+func Open(t testing.TB) (*gorm.DB, *pgxpool.Pool) {
 	t.Helper()
 	dsn := os.Getenv("TEST_PG_DSN")
 	if dsn == "" {

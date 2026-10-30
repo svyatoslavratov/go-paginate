@@ -14,15 +14,19 @@ concurrency:
 
 jobs:
   test:
-    name: test (Go ${{ matrix.go }})
+    name: test (Go ${{ matrix.go }}, Postgres ${{ matrix.postgres }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        go: [oldstable, stable]
+        go: [stable]
+        postgres: ["13", "14", "15", "16", "17", "18"]
+        include:
+          - go: oldstable
+            postgres: "17"
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:${{ matrix.postgres }}-alpine
         env:
           POSTGRES_PASSWORD: test
           POSTGRES_DB: paginate
@@ -45,11 +49,11 @@ jobs:
       - name: Verify modules
         run: go mod verify
       - name: Test
-        run: go test -race -coverpkg=./... -coverprofile=coverage.out ./...
+        run: go test -race -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
       - name: Coverage
         run: go tool cover -func=coverage.out | tail -n 1
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: matrix.go == 'stable'
+        if: matrix.go == 'stable' && matrix.postgres == '17'
         with:
           name: coverage
           path: coverage.out
@@ -66,6 +70,11 @@ jobs:
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.14.0
+      - name: Lint the examples
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.14.0
+          working-directory: examples
 
   tidy:
     runs-on: ubuntu-latest
@@ -79,7 +88,8 @@ jobs:
       - name: go mod tidy leaves no diff
         run: |
           go mod tidy
-          git diff --exit-code go.mod go.sum
+          (cd examples && go mod tidy)
+          git diff --exit-code -- go.mod go.sum examples/go.mod examples/go.sum
 
   vulncheck:
     runs-on: ubuntu-latest
@@ -92,3 +102,71 @@ jobs:
           go-version: stable
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  examples:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+      - name: Vet, build and test
+        run: |
+          go vet ./...
+          go build ./...
+          go test ./...
+      - name: Build the browser demo
+        working-directory: .
+        run: make demo
+      - name: Run the demo with Docker Compose
+        working-directory: examples/catalog
+        run: |
+          docker compose up --build --detach --wait
+          for attempt in $(seq 30); do
+            curl --fail --silent --output /dev/null "http://localhost:8080/api/schema" && break
+            sleep 2
+          done
+          curl --fail --silent --show-error "http://localhost:8080/api/products?limit=0" | grep --quiet '"totalItems":240'
+          curl --fail --silent --show-error "http://localhost:8080/api/products?filter=category%3D\$in:seating+OR+price%3D\$lt:10" | grep --quiet '"links"'
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' 'http://localhost:8080/api/products?filter.price=$gt:abc')" = 400
+      - name: Stop the demo
+        if: always()
+        working-directory: examples/catalog
+        run: docker compose down --volumes
+
+  api:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+      - name: Compare the API with the latest release
+        env:
+          BREAKING_ALLOWED: ${{ contains(github.event.pull_request.labels.*.name, 'breaking-change') }}
+        run: |
+          base=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          if [ -z "$base" ]; then
+            echo "No release yet: nothing to compare the API with." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          go run golang.org/x/exp/cmd/gorelease@v0.0.0-20261013213113-2ab7f3cbc5fb -base="$base" > gorelease.txt 2>&1 || true
+          {
+            echo "## API compared with $base"
+            echo '```'
+            cat gorelease.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if grep -q '^## incompatible changes' gorelease.txt && [ "$BREAKING_ALLOWED" != "true" ]; then
+            echo "::error::The API changed incompatibly since $base. Label the pull request breaking-change if that is intended."
+            exit 1
+          fi
