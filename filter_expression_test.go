@@ -152,22 +152,18 @@ func TestFilterExpressionComplexity(t *testing.T) {
 	}
 }
 
-func expressionConfig() *Config {
-	cfg := NewConfig("t", []string{"t.id"}, map[string]string{
-		"name":   "t.name",
-		"age":    "t.age",
-		"status": "t.status",
-		"tags":   "t.tags",
-		"secret": "t.secret",
+func expressionEndpoint(lenient bool) *Endpoint {
+	return MustCompile(Config{
+		Fields: []Field{
+			{Name: "name", Column: "t.name", Filter: AllOperators},
+			{Name: "age", Column: "t.age", Type: Int, Filter: []Operator{OpGte, OpLt, OpBtw}},
+			{Name: "status", Column: "t.status", Filter: []Operator{OpIn}},
+			{Name: "tags", Column: "t.tags", Filter: []Operator{OpContains}},
+			{Name: "secret", Column: "t.secret"},
+		},
+		TieBreak: "t.id",
+		Lenient:  lenient,
 	})
-	cfg.FilterableColumns = FilterableColumns{
-		"t.name":   AllOperators,
-		"t.age":    {OpGte, OpLt, OpBtw},
-		"t.status": {OpIn},
-		"t.tags":   {OpContains},
-	}
-	cfg.MaxFilterValues = DefaultMaxFilterValues
-	return cfg
 }
 
 func TestRenderFilterExpression(t *testing.T) {
@@ -215,22 +211,21 @@ func TestRenderFilterExpression(t *testing.T) {
 			wantSQL:  "CAST(t.name AS TEXT) ILIKE ?",
 			wantArgs: []any{`%50\% off%`},
 		},
-		{name: "unknown field fails even without strict validation", input: `password=$eq:x OR name=$eq:y`, wantErr: "unknown filter field password"},
-		{name: "field that is not filterable", input: `secret=$eq:x`, wantErr: "filter on secret is not allowed"},
-		{name: "operator that is not allowed", input: `age=$ilike:1`, wantErr: "operator $ilike is not allowed for age"},
-		{name: "comparators belong to filter.<field>", input: `name=$or:x`, wantErr: "$and/$or are not allowed"},
-		{name: "malformed list", input: `age=$btw:1,2,3`, wantErr: "expects 1 or 2 non-empty values"},
+		{name: "unknown field fails even with Lenient", input: `password=$eq:x OR name=$eq:y`, wantErr: "unknown filter field password"},
+		{name: "field that is not filterable", input: `secret=$eq:x`, strict: true, wantErr: "filter on secret is not allowed"},
+		{name: "operator that is not allowed fails even with Lenient", input: `age=$ilike:1`, wantErr: "operator $ilike is not allowed for age"},
+		{name: "comparators belong to filter.<field>", input: `name=$or:x`, strict: true, wantErr: "$and/$or are not allowed"},
+		{name: "malformed list", input: `age=$btw:1,2,3`, strict: true, wantErr: "expects 1 or 2 non-empty values"},
+		{name: "value of the wrong type", input: `age=$gte:old OR name=x`, strict: true, wantErr: `invalid value "old" for age`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			cfg := expressionConfig()
-			cfg.StrictValidate = tc.strict
 			node, err := parseFilterExpression(tc.input, DefaultMaxFilterExpressionComplexity)
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
-			got, err := node.render(cfg)
+			got, err := node.render(expressionEndpoint(!tc.strict))
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !errors.Is(err, ErrInvalidRequest) {
 					t.Fatalf("want validation error with %q, got %v", tc.wantErr, err)

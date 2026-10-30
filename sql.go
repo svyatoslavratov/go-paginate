@@ -41,13 +41,13 @@ func searchExpr(columns []string, terms []string) sqlExpr {
 }
 
 // filterExpr joins filter.<field> conditions the way nestjs-paginate (up to 14) does: the
-// conditions of a column form a chain in request order, each joined to the previous one by its
-// own $and or $or, with SQL precedence (AND binds tighter). Columns whose first condition is $or
-// are ORed into one group; the group and every other column are ANDed.
+// conditions of a field form a chain in request order, each joined to the previous one by its own
+// $and or $or, with SQL precedence (AND binds tighter). Fields whose first condition is $or are
+// ORed into one group; the group and every other field are ANDed.
 //
 //	filter.id=$gt:3&filter.id=$lt:5&filter.id=$or:$eq:7  →  (id > 3 AND id < 5 OR id = 7)
 //	filter.a=$or:1&filter.b=$or:2&filter.c=3             →  (a = 1 OR b = 2) AND c = 3
-func filterExpr(filters []columnFilter, compareAsText bool) (sqlExpr, error) {
+func filterExpr(filters []fieldFilter, compareAsText bool) (sqlExpr, error) {
 	orGroup := make([]sqlExpr, 0, len(filters))
 	andGroup := make([]sqlExpr, 0, len(filters))
 	for _, filter := range filters {
@@ -70,13 +70,13 @@ func filterExpr(filters []columnFilter, compareAsText bool) (sqlExpr, error) {
 	return joinExprs(parts, " AND "), nil
 }
 
-// chainExpr joins the conditions of a column; the comparator of the first one is not used here.
-func chainExpr(filter columnFilter, compareAsText bool) (sqlExpr, error) {
+// chainExpr joins the conditions of a field; the comparator of the first one is not used here.
+func chainExpr(filter fieldFilter, compareAsText bool) (sqlExpr, error) {
 	var sql strings.Builder
 	args := make([]any, 0, len(filter.conditions))
 	hasOr := false
 	for i, condition := range filter.conditions {
-		expr, err := conditionExpr(filter.column, condition, compareAsText)
+		expr, err := conditionExpr(filter.field.Column, condition, compareAsText)
 		if err != nil {
 			return sqlExpr{}, err
 		}
@@ -147,7 +147,7 @@ func operatorExpr(column string, condition filterCondition, compareAsText bool) 
 	case OpContains:
 		return sqlExpr{sql: column + " @> ?", args: []any{arrayLiteral(values)}}, nil
 	}
-	return sqlExpr{}, invalidRequest("unknown operator %s", condition.operator)
+	return sqlExpr{}, invalidRequest(CodeOperatorNotAllowed, "", "unknown operator %s", condition.operator)
 }
 
 // joinExprs joins expressions with sep, parenthesizing each part and the whole when there are

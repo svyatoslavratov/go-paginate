@@ -1,102 +1,99 @@
 package paginate
 
 import (
-	"errors"
 	"reflect"
 	"strings"
 	"testing"
 )
 
-func TestParseFilters(t *testing.T) {
+func TestFilters(t *testing.T) {
 	t.Parallel()
-	filterable := FilterableColumns{
-		"t.status": {},
-		"t.age":    {OpGt, OpBtw},
-		"t.name":   AllOperators,
+	type parsed struct {
+		field      string
+		conditions []filterCondition
 	}
 	tests := []struct {
 		name    string
-		filter  map[string][]string
-		strict  bool
-		want    []columnFilter
-		wantErr string
+		filter  FilterQuery
+		lenient bool
+		want    []parsed
+		code    Code
+		field   string
+		message string
 	}{
 		{
-			name:   "empty list allows $eq only",
-			filter: map[string][]string{"t.status": {"active", "$not:$eq:banned"}},
-			strict: true,
-			want: []columnFilter{{column: "t.status", conditions: []filterCondition{
+			name:   "a filter of $eq only",
+			filter: FilterQuery{"status": {"active", "$not:$eq:banned"}},
+			want: []parsed{{"status", []filterCondition{
 				{comparator: OpAnd, operator: OpEq, values: []string{"active"}},
 				{comparator: OpAnd, not: true, operator: OpEq, values: []string{"banned"}},
 			}}},
 		},
 		{
-			name:    "operator outside an empty list",
-			filter:  map[string][]string{"t.status": {"$ilike:act"}},
-			strict:  true,
-			wantErr: "operator $ilike is not allowed for status",
+			name:    "an operator outside the list",
+			filter:  FilterQuery{"status": {"$ilike:act"}},
+			code:    CodeOperatorNotAllowed,
+			field:   "status",
+			message: "operator $ilike is not allowed for status",
 		},
 		{
-			name:   "not allowed operator is dropped without strict",
-			filter: map[string][]string{"t.status": {"$ilike:act", "active"}},
-			want: []columnFilter{{column: "t.status", conditions: []filterCondition{
+			name:    "Lenient drops an operator that is not allowed",
+			filter:  FilterQuery{"status": {"$ilike:act", "active"}},
+			lenient: true,
+			want: []parsed{{"status", []filterCondition{
 				{comparator: OpAnd, operator: OpEq, values: []string{"active"}},
 			}}},
 		},
+		{name: "a field that is not filterable", filter: FilterQuery{"secret": {"x"}}, code: CodeFilterNotAllowed, field: "secret", message: "filter on secret is not allowed"},
+		{name: "Lenient drops a field that is not filterable", filter: FilterQuery{"secret": {"x"}}, lenient: true, want: []parsed{}},
 		{
-			name:    "column that is not filterable",
-			filter:  map[string][]string{"t.secret": {"x"}},
-			strict:  true,
-			wantErr: "filter on secret is not allowed",
-		},
-		{
-			name:   "column that is not filterable is dropped without strict",
-			filter: map[string][]string{"t.secret": {"x"}},
-			want:   []columnFilter{},
-		},
-		{
-			name:   "columns sorted, conditions in request order, lists trimmed",
-			filter: map[string][]string{"t.name": {"$in:a, b", "$or:$null"}, "t.age": {"$btw: 4 , 6"}},
-			strict: true,
-			want: []columnFilter{
-				{column: "t.age", conditions: []filterCondition{
-					{comparator: OpAnd, operator: OpBtw, values: []string{"4", "6"}},
-				}},
-				{column: "t.name", conditions: []filterCondition{
+			name:   "fields sorted, conditions in request order, lists trimmed",
+			filter: FilterQuery{"name": {"$in:a, b", "$or:$null"}, "age": {"$btw: 4 , 6"}},
+			want: []parsed{
+				{"age", []filterCondition{{comparator: OpAnd, operator: OpBtw, values: []string{"4", "6"}}}},
+				{"name", []filterCondition{
 					{comparator: OpAnd, operator: OpIn, values: []string{"a", "b"}},
 					{comparator: OpOr, operator: OpNull},
 				}},
 			},
 		},
-		{
-			name:    "malformed between",
-			filter:  map[string][]string{"t.age": {"$btw:1,2,3"}},
-			strict:  true,
-			wantErr: "expects 1 or 2 non-empty values",
-		},
-		{
-			name:    "list over the cap fails even without strict",
-			filter:  map[string][]string{"t.name": {"$in:" + strings.Repeat("x,", 3) + "x"}},
-			wantErr: "more than 3 values",
-		},
+		{name: "a malformed range", filter: FilterQuery{"age": {"$btw:1,2,3"}}, code: CodeInvalidValue, field: "age", message: "expects 1 or 2 non-empty values"},
+		{name: "a list over the cap fails even with Lenient", filter: FilterQuery{"name": {"$in:" + strings.Repeat("x,", 3) + "x"}}, lenient: true, code: CodeTooManyValues, field: "name", message: "more than 3 values"},
+		{name: "a value that is not an integer", filter: FilterQuery{"age": {"$gt:old"}}, code: CodeInvalidValue, field: "age", message: `invalid value "old" for age: must be an integer`},
+		{name: "a range end that is not an integer", filter: FilterQuery{"age": {"$btw:1,x"}}, code: CodeInvalidValue, field: "age", message: `"x"`},
+		{name: "an element outside the enum", filter: FilterQuery{"tags": {"$contains:new,sold"}}, code: CodeInvalidValue, field: "tags", message: "must be one of new, sale"},
+		{name: "elements of the enum", filter: FilterQuery{"tags": {"$contains:new,sale"}}, want: []parsed{{"tags", []filterCondition{{comparator: OpAnd, operator: OpContains, values: []string{"new", "sale"}}}}}},
+		{name: "a timestamp that does not parse", filter: FilterQuery{"seenAt": {"$gte:yesterday"}}, code: CodeInvalidValue, field: "seenAt", message: "must be a timestamp"},
+		{name: "$null takes no value to check", filter: FilterQuery{"seenAt": {"$not:$null"}}, want: []parsed{{"seenAt", []filterCondition{{comparator: OpAnd, not: true, operator: OpNull}}}}},
+		{name: "an empty value", filter: FilterQuery{"status": {""}}, code: CodeInvalidValue, field: "status", message: "empty filter value"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			cfg := &Config{FilterableColumns: filterable, StrictValidate: tc.strict, MaxFilterValues: 3}
-			input := make(map[string]*fieldValues, len(tc.filter))
-			for column, values := range tc.filter {
-				input[column] = &fieldValues{field: strings.TrimPrefix(column, "t."), values: values}
-			}
-			got, err := parseFilters(input, cfg)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !errors.Is(err, ErrInvalidRequest) {
-					t.Fatalf("want validation error with %q, got %v", tc.wantErr, err)
-				}
+			e := MustCompile(Config{
+				Fields: []Field{
+					{Name: "status", Column: "t.status", Filter: []Operator{OpEq}},
+					{Name: "age", Column: "t.age", Type: Int, Filter: []Operator{OpGt, OpBtw}},
+					{Name: "name", Column: "t.name", Filter: AllOperators},
+					{Name: "secret", Column: "t.secret"},
+					{Name: "tags", Column: "t.tags", Type: ArrayOf(Enum("new", "sale")), Filter: []Operator{OpContains}},
+					{Name: "seenAt", Column: "t.seen_at", Type: Time, Filter: []Operator{OpGte, OpNull}},
+				},
+				TieBreak:        "t.id",
+				Lenient:         tc.lenient,
+				MaxFilterValues: 3,
+			})
+			filters, err := e.filters(&Request{Filter: tc.filter})
+			if tc.code != "" {
+				wantError(t, err, tc.code, tc.field, tc.message)
 				return
 			}
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
+			}
+			got := make([]parsed, len(filters))
+			for i, filter := range filters {
+				got[i] = parsed{filter.field.Name, filter.conditions}
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("want %+v, got %+v", tc.want, got)
@@ -107,11 +104,11 @@ func TestParseFilters(t *testing.T) {
 
 func TestIsAllowedOperator(t *testing.T) {
 	t.Parallel()
-	if !isAllowedOperator(OpEq, nil) {
-		t.Fatal("$eq must always be allowed")
+	if !isAllowedOperator(OpEq, []Operator{OpGt}) {
+		t.Fatal("$eq must always be allowed on a filterable field")
 	}
-	if isAllowedOperator(OpGt, nil) || isAllowedOperator(OpGt, []Operator{}) {
-		t.Fatal("an empty list allows $eq only")
+	if isAllowedOperator(OpGt, []Operator{OpEq}) {
+		t.Fatal("a list of $eq allows $eq only")
 	}
 	for _, operator := range AllOperators {
 		if !isAllowedOperator(operator, AllOperators) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -14,12 +15,13 @@ import (
 
 // Paginate runs a paginated query on top of db: db carries the table, joins, Select, preloads and
 // the conditions of the endpoint; the request adds search, filters, sorting and the page. T is the
-// type Find scans rows into. Errors wrap paginate.ErrInvalidRequest for the client's mistakes.
-func Paginate[T any](ctx context.Context, req paginate.Request, cfg paginate.Config, db *gorm.DB) (*paginate.Response[T], error) {
-	if db == nil {
-		return nil, errors.New("gormx: db is required")
+// type Find scans rows into; in cursor pagination it must carry the sort fields. Errors wrap
+// paginate.ErrInvalidRequest for the client's mistakes; paginate.HTTPStatus picks the status.
+func Paginate[T any](ctx context.Context, req paginate.Request, endpoint *paginate.Endpoint, db *gorm.DB) (*paginate.Response[T], error) {
+	if db == nil || endpoint == nil {
+		return nil, errors.New("gormx: db and endpoint are required")
 	}
-	q, err := paginate.Prepare(&req, cfg)
+	q, err := endpoint.Prepare(&req)
 	if err != nil {
 		return nil, err
 	}
@@ -31,27 +33,101 @@ func Paginate[T any](ctx context.Context, req paginate.Request, cfg paginate.Con
 	for _, condition := range q.Where {
 		query = query.Where(condition.SQL, condition.Args...)
 	}
+	withTieBreak := tieBreakAllowed(query.Statement, q.TieBreak)
+	if q.Keyset && !withTieBreak {
+		return nil, errors.New("gormx: cursor pagination needs the tie-breaker in ORDER BY, which a DISTINCT or GROUP BY query without it cannot have")
+	}
 
-	var count int64
-	if err := query.Session(&gorm.Session{}).Count(&count).Error; err != nil {
-		return nil, q.WrapError("count", err)
+	// Both sessions are cut before anything runs, so the count may run on its own goroutine.
+	countQuery, page := query.Session(&gorm.Session{}), query.Session(&gorm.Session{})
+	var total paginate.Total
+	count := func() (err error) {
+		total, err = countRows[T](countQuery, q)
+		return err
 	}
 	if q.Mode == paginate.ModeCount {
-		return paginate.NewResponse[T](nil, req, uint64(count)), nil
+		if err := count(); err != nil {
+			return nil, err
+		}
+		return paginate.NewResponse[T](q, nil, total)
 	}
 
 	if q.Mode == paginate.ModeDefault {
-		query = query.Limit(int(q.Limit)).Offset(int(q.Offset))
+		page = page.Limit(int(q.FetchLimit())).Offset(int(q.Offset))
 	}
-	for _, order := range q.OrderBy(tieBreakAllowed(query.Statement, q.TieBreak)) {
-		query = query.Order(order)
+	for _, order := range q.OrderBy(withTieBreak) {
+		page = page.Order(order)
+	}
+	var rows []T
+	find := func() error {
+		if err := page.Find(&rows).Error; err != nil {
+			return q.WrapError("select", err)
+		}
+		return nil
 	}
 
-	var data []T
-	if err := query.Find(&data).Error; err != nil {
-		return nil, q.WrapError("select", err)
+	switch {
+	case q.Count == paginate.CountNone:
+		err = find()
+	case q.Parallel && !inTransaction(db):
+		var wg sync.WaitGroup
+		var countErr error
+		wg.Go(func() { countErr = count() })
+		findErr := find()
+		wg.Wait()
+		err = errors.Join(findErr, countErr)
+	default:
+		if err = count(); err == nil {
+			err = find()
+		}
 	}
-	return paginate.NewResponse(data, req, uint64(count)), nil
+	if err != nil {
+		return nil, err
+	}
+	return paginate.NewResponse(q, rows, total)
+}
+
+// inTransaction reports a db bound to a transaction: one connection, which cannot run two
+// statements at once.
+func inTransaction(db *gorm.DB) bool {
+	_, ok := db.Statement.ConnPool.(gorm.TxCommitter)
+	return ok
+}
+
+// countRows counts the rows of query the way q says: COUNT(*), or the planner's estimate, counted
+// exactly below q.ExactCountBelow.
+func countRows[T any](query *gorm.DB, q *paginate.Query) (paginate.Total, error) {
+	if q.Count == paginate.CountEstimate {
+		estimate, err := estimateRows[T](query)
+		if err != nil {
+			return paginate.Total{}, q.WrapError("estimate", err)
+		}
+		if estimate >= q.ExactCountBelow {
+			return paginate.Total{Items: estimate, Count: paginate.CountEstimate}, nil
+		}
+	}
+	counted := query.Session(&gorm.Session{})
+	if query.Statement.Distinct || selectsDistinct(query.Statement) {
+		// GORM's Count turns DISTINCT a, b into count(*) of every row; the subquery keeps it.
+		counted = query.Session(&gorm.Session{NewDB: true}).Table("(?) AS paginate_count", query.Session(&gorm.Session{}))
+	}
+	var n int64
+	if err := counted.Count(&n).Error; err != nil {
+		return paginate.Total{}, q.WrapError("count", err)
+	}
+	return paginate.Total{Items: uint64(n), Count: paginate.CountExact}, nil
+}
+
+// estimateRows asks the planner how many rows the query returns. GORM renders the query in dry-run
+// mode; EXPLAIN goes straight to the connection, which takes the $n placeholders as they are.
+func estimateRows[T any](query *gorm.DB) (uint64, error) {
+	stmt := query.Session(&gorm.Session{DryRun: true}).Find(new([]T)).Statement
+	var plan []byte
+	row := stmt.ConnPool.QueryRowContext(stmt.Context, paginate.ExplainPrefix+stmt.SQL.String(), stmt.Vars...)
+	if err := row.Scan(&plan); err != nil {
+		return 0, err
+	}
+	return paginate.EstimateFromPlan(plan)
 }
 
 // tieBreakAllowed tells whether the tie-breaker may go into ORDER BY: Postgres rejects ORDER BY a
@@ -71,14 +147,17 @@ func tieBreakAllowed(stmt *gorm.Statement, column string) bool {
 	}
 	short := column[strings.LastIndex(column, ".")+1:]
 	for _, groupColumn := range groupBy.Columns {
-		name := groupColumn.Name
-		if groupColumn.Table != "" {
-			name = groupColumn.Table + "." + name
-		}
-		// A qualified column must match exactly (other.id is not templates.id); an unqualified one
-		// is taken as the same column when the name matches.
-		if name == column || name == short {
-			return true
+		// Group("templates.id, templates.title") is one raw clause column of several columns.
+		for name := range strings.SplitSeq(groupColumn.Name, ",") {
+			name = strings.TrimSpace(name)
+			if groupColumn.Table != "" {
+				name = groupColumn.Table + "." + name
+			}
+			// A qualified column must match exactly (other.id is not templates.id); an
+			// unqualified one is taken as the same column when the name matches.
+			if name == column || name == short {
+				return true
+			}
 		}
 	}
 	return false

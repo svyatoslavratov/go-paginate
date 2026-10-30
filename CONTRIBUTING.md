@@ -40,9 +40,10 @@ Each integration test works in its own schema and drops it afterwards.
 ### Fuzzing
 
 The parsers take untrusted input, so each has a fuzz target in [fuzz_test.go](fuzz_test.go):
-`filter=` expressions, `filter.<field>` values, `sortBy` and whole query strings. Besides "no
+`filter=` expressions, `filter.<field>` values, `sortBy`, whole query strings (on an endpoint of
+page numbers and one of cursors), and cursors. Besides "no
 panic", the targets check what the parsers promise: every value ends up a bind parameter, and an
-error is always `ErrInvalidRequest`. A failing input lands in `testdata/fuzz/<target>/`; commit it
+error is always an `ErrInvalidRequest` with a code. A failing input lands in `testdata/fuzz/<target>/`; commit it
 with the fix, and `go test` replays it from then on. CI fuzzes every target for five minutes a week.
 
 ### Benchmarks

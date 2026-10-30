@@ -72,7 +72,7 @@ func (t expressionToken) String() string {
 }
 
 func expressionError(format string, args ...any) error {
-	return invalidRequest(format, args...)
+	return invalidRequest(CodeInvalidExpression, "", format, args...)
 }
 
 func isExpressionSpace(c byte) bool {
@@ -278,12 +278,12 @@ func (p *expressionParser) parsePrimary() (*filterNode, error) {
 	return nil, expressionError("unexpected %q in filter expression", token.String())
 }
 
-// render turns the tree into SQL. Terms are always validated, whatever StrictValidate says: dropping
-// a term would change what the expression means.
-func (n *filterNode) render(cfg *Config) (sqlExpr, error) {
+// render turns the tree into SQL. Terms are always checked, Lenient or not: dropping a term would
+// change what the expression means.
+func (n *filterNode) render(e *Endpoint) (sqlExpr, error) {
 	switch n.kind {
 	case filterNot:
-		child, err := n.children[0].render(cfg)
+		child, err := n.children[0].render(e)
 		if err != nil {
 			return sqlExpr{}, err
 		}
@@ -291,7 +291,7 @@ func (n *filterNode) render(cfg *Config) (sqlExpr, error) {
 	case filterAnd, filterOr:
 		children := make([]sqlExpr, 0, len(n.children))
 		for _, child := range n.children {
-			expr, err := child.render(cfg)
+			expr, err := child.render(e)
 			if err != nil {
 				return sqlExpr{}, err
 			}
@@ -303,17 +303,16 @@ func (n *filterNode) render(cfg *Config) (sqlExpr, error) {
 		return joinExprs(children, " OR "), nil
 	}
 
-	column, exists := cfg.FieldColumns[n.field]
+	field, exists := e.fields[n.field]
 	if !exists {
-		return sqlExpr{}, invalidRequest("unknown filter field %s", n.field)
+		return sqlExpr{}, invalidRequest(CodeUnknownField, n.field, "unknown filter field %s", n.field)
 	}
-	allowed, filterable := cfg.FilterableColumns[column]
-	if !filterable {
-		return sqlExpr{}, invalidRequest("filter on %s is not allowed", n.field)
+	if field.Filter == nil {
+		return sqlExpr{}, invalidRequest(CodeFilterNotAllowed, n.field, "filter on %s is not allowed", n.field)
 	}
-	condition, _, err := parseFilterCondition(n.value, n.field, allowed, cfg.MaxFilterValues, true)
+	condition, err := parseFilterCondition(n.value, field, e.cfg.MaxFilterValues, true)
 	if err != nil {
 		return sqlExpr{}, err
 	}
-	return conditionExpr(column, condition, cfg.CompareAsText)
+	return conditionExpr(field.Column, condition, e.cfg.CompareAsText)
 }

@@ -5,10 +5,10 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -66,8 +66,8 @@ func listProducts(db *gorm.DB) http.HandlerFunc {
 			writeError(w, err)
 			return
 		}
-		cfg := catalog.ConfigFor(r.URL.Query().Get("format"))
-		page, err := gormx.Paginate[catalog.Product](r.Context(), *req, cfg, db.Model(&catalog.Product{}))
+		endpoint := catalog.Endpoint(catalog.OptionsOf(r.URL.Query()))
+		page, err := gormx.Paginate[catalog.Product](r.Context(), *req, endpoint, db.Model(&catalog.Product{}))
 		if err != nil {
 			writeError(w, err)
 			return
@@ -78,7 +78,14 @@ func listProducts(db *gorm.DB) http.HandlerFunc {
 
 type capturedKey struct{}
 
-// productsSQL runs the same request in GORM's dry-run mode and returns the SQL it would run.
+// statement is SQL the page shows, with what it is for.
+type statement struct {
+	Label string `json:"label"`
+	SQL   string `json:"sql"`
+}
+
+// productsSQL runs the same request in GORM's dry-run mode and returns the SQL it would run. The
+// estimate is real: GORM renders its query, and EXPLAIN runs on the database.
 func productsSQL(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		req, err := paginate.ParseRequest(r)
@@ -86,19 +93,28 @@ func productsSQL(db *gorm.DB) http.HandlerFunc {
 			writeError(w, err)
 			return
 		}
-		var statements []string
-		ctx := context.WithValue(r.Context(), capturedKey{}, &statements)
+		endpoint := catalog.Endpoint(catalog.OptionsOf(r.URL.Query()))
+		var captured []string
+		ctx := context.WithValue(r.Context(), capturedKey{}, &captured)
 		dry := db.Session(&gorm.Session{DryRun: true}).Model(&catalog.Product{})
-		cfg := catalog.ConfigFor(r.URL.Query().Get("format"))
-		if _, err := gormx.Paginate[catalog.Product](ctx, *req, cfg, dry); err != nil {
+		if _, err := gormx.Paginate[catalog.Product](ctx, *req, endpoint, dry); err != nil {
 			writeError(w, err)
 			return
 		}
-		answer := map[string]string{"count": statements[0]}
-		if len(statements) > 1 {
-			answer["select"] = statements[1]
+		// The page always has an ORDER BY (the default sort at least); the query of the estimate has
+		// none.
+		statements := make([]statement, 0, len(captured))
+		for _, sql := range captured {
+			switch {
+			case strings.HasPrefix(sql, "SELECT count(*)"):
+				statements = append(statements, statement{"the count", sql})
+			case !strings.Contains(sql, "ORDER BY"):
+				statements = append(statements, statement{"the estimate", paginate.ExplainPrefix + sql})
+			default:
+				statements = append(statements, statement{"the page", sql})
+			}
 		}
-		writeJSON(w, http.StatusOK, answer)
+		writeJSON(w, http.StatusOK, statements)
 	}
 }
 
@@ -112,13 +128,15 @@ func captureSQL(tx *gorm.DB) {
 	}
 }
 
+// writeError answers a client's mistake with its code, field and message, anything else with a
+// bare 500.
 func writeError(w http.ResponseWriter, err error) {
-	if errors.Is(err, paginate.ErrInvalidRequest) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"message": err.Error()})
+	if status := paginate.HTTPStatus(err); status == http.StatusBadRequest {
+		writeJSON(w, status, err)
 		return
 	}
 	log.Printf("list products: %v", err)
-	writeJSON(w, http.StatusInternalServerError, map[string]string{"message": "internal error"})
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "internal", "message": "internal error"})
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

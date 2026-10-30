@@ -11,11 +11,12 @@ type filterToken struct {
 	value         string
 }
 
-// parseFilterToken splits a filter value the way nestjs-paginate does: up to three prefixes, a
+// parseFilterToken splits a filter value much as nestjs-paginate does: up to three prefixes, a
 // comparator ($and by default, or $or), the $not suffix and an operator ($eq by default), in any
 // order and each at most once, then the value. Everything after the prefixes is the value, so it
-// may contain ":" or operator-like text: "$eq:12:30" is "12:30", "$eq:$gt" is "$gt". $null takes
-// no value.
+// may contain ":" or operator-like text: "$eq:12:30" is "12:30", "$eq:$gt" is "$gt". A repeated
+// prefix is part of the value too ("$eq:$gt:5" is "$gt:5"), where nestjs-paginate lets the last
+// operator win. $null takes no value.
 func parseFilterToken(raw string) filterToken {
 	token := filterToken{comparator: OpAnd, operator: OpEq}
 	var hasSuffix, hasOperator bool

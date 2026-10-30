@@ -40,7 +40,8 @@ const (
 	OpOr Operator = "$or"
 )
 
-// AllOperators allows every operator on a column, like `true` in nestjs-paginate.
+// AllOperators allows every operator on a field, like `true` in nestjs-paginate: every operator
+// that fits the field's Type, so $contains only on arrays and on fields without a Type.
 var AllOperators = []Operator{OpEq, OpGt, OpGte, OpIn, OpNull, OpLt, OpLte, OpBtw, OpILike, OpSw, OpContains}
 
 func isOperator(value string) bool {

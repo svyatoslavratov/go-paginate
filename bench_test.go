@@ -36,6 +36,7 @@ func BenchmarkPrepare(b *testing.B) {
 	}
 	cfg := benchdata.Config()
 	cfg.MaxFilterValues = 1000
+	endpoint := paginate.MustCompile(cfg)
 	for _, tc := range cases {
 		values, err := url.ParseQuery(tc.query)
 		if err != nil {
@@ -49,7 +50,7 @@ func BenchmarkPrepare(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				req := *parsed
-				if _, err := paginate.Prepare(&req, cfg); err != nil {
+				if _, err := endpoint.Prepare(&req); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -82,13 +83,18 @@ func BenchmarkNewResponse(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if _, err := paginate.Prepare(req, cfg); err != nil {
+		q, err := paginate.MustCompile(cfg).Prepare(req)
+		if err != nil {
 			b.Fatal(err)
 		}
 		b.Run(name+"/json", func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				if _, err := json.Marshal(paginate.NewResponse(rows, *req, 1234)); err != nil {
+				page, err := paginate.NewResponse(q, rows, paginate.Total{Items: 1234})
+				if err != nil {
+					b.Fatal(err)
+				}
+				if _, err := json.Marshal(page); err != nil {
 					b.Fatal(err)
 				}
 			}

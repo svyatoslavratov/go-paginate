@@ -44,6 +44,21 @@
           </select>
         </label>
         <label class="field">
+          <span>pages</span>
+          <select id="pages">
+            <option value="numbers">page numbers</option>
+            <option value="cursor">cursor (keyset)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>count</span>
+          <select id="count">
+            <option value="exact">exact</option>
+            <option value="estimate">estimate</option>
+            <option value="none">none</option>
+          </select>
+        </label>
+        <label class="field">
           <span>answer</span>
           <select id="format">
             <option value="nestjs">nestjs-paginate</option>
@@ -82,7 +97,7 @@
         </table>
       </div>
       <nav id="pager" class="pager" aria-label="Pages"></nav>
-      <p class="hint">Click a column to sort, Shift+click to add a sort key. The tie-breaker (<code>id</code>) keeps pages stable.</p>
+      <p class="hint">Click a column to sort, Shift+click to add a sort key. The tie-breaker (<code>id</code>) keeps pages stable. A 400 marks the filter it is about.</p>
     </section>
 
     <section class="card debug">

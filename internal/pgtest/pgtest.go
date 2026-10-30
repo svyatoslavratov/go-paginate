@@ -30,26 +30,40 @@ CREATE TABLE items (
 	tags       text[] NOT NULL DEFAULT '{}',
 	sizes      int[] NOT NULL DEFAULT '{}',
 	shop_id    int NOT NULL,
+	rank       int,
 	created_at timestamptz NOT NULL,
 	deleted_at timestamptz
 );
-INSERT INTO items (id, uid, name, price, tags, sizes, shop_id, created_at, deleted_at) VALUES
-	(1, '00000000-0000-0000-0000-000000000001', 'Red box',     10.50, '{red,box}',     '{1,2}', 1, '2024-01-01T00:00:00Z', NULL),
-	(2, '00000000-0000-0000-0000-000000000002', 'Blue box',    20.00, '{blue,box}',    '{2,3}', 1, '2024-01-02T00:00:00Z', NULL),
-	(3, '00000000-0000-0000-0000-000000000003', '50% off',      5.00, '{sale}',        '{1}',   2, '2024-01-02T00:00:00Z', NULL),
-	(4, '00000000-0000-0000-0000-000000000004', 'Under_score',  7.25, '{}',            '{}',    2, '2024-01-03T00:00:00Z', NULL),
-	(5, '00000000-0000-0000-0000-000000000005', 'Deleted red',  1.00, '{red}',         '{}',    1, '2024-01-04T00:00:00Z', '2024-02-01T00:00:00Z'),
-	(6, '00000000-0000-0000-0000-000000000006', 'big red box', 30.00, '{red,big,box}', '{5}',   1, '2024-01-05T00:00:00Z', NULL);
+INSERT INTO items (id, uid, name, price, tags, sizes, shop_id, rank, created_at, deleted_at) VALUES
+	(1, '00000000-0000-0000-0000-000000000001', 'Red box',     10.50, '{red,box}',     '{1,2}', 1, 2,    '2024-01-01T00:00:00Z', NULL),
+	(2, '00000000-0000-0000-0000-000000000002', 'Blue box',    20.00, '{blue,box}',    '{2,3}', 1, NULL, '2024-01-02T00:00:00Z', NULL),
+	(3, '00000000-0000-0000-0000-000000000003', '50% off',      5.00, '{sale}',        '{1}',   2, 1,    '2024-01-02T00:00:00Z', NULL),
+	(4, '00000000-0000-0000-0000-000000000004', 'Under_score',  7.25, '{}',            '{}',    2, NULL, '2024-01-03T00:00:00Z', NULL),
+	(5, '00000000-0000-0000-0000-000000000005', 'Deleted red',  1.00, '{red}',         '{}',    1, 3,    '2024-01-04T00:00:00Z', '2024-02-01T00:00:00Z'),
+	(6, '00000000-0000-0000-0000-000000000006', 'big red box', 30.00, '{red,big,box}', '{5}',   1, 2,    '2024-01-05T00:00:00Z', NULL);
 `
 
-// Item is a row of the fixture table for GORM.
+// Item is a row of the fixture table for GORM. It has no json tags: cursors find its fields by
+// column.
 type Item struct {
 	ID        int64 `gorm:"primaryKey"`
 	Name      string
 	ShopID    int
+	Rank      *int
 	CreatedAt time.Time
 	DeletedAt gorm.DeletedAt
 }
+
+// Row is a row of the fixture table for pgx.RowToStructByName.
+type Row struct {
+	ID        int64     `db:"id"`
+	Name      string    `db:"name"`
+	Rank      *int32    `db:"rank"`
+	CreatedAt time.Time `db:"created_at"`
+}
+
+// RowColumns are the columns of Row.
+var RowColumns = []string{"items.id", "items.name", "items.rank", "items.created_at"}
 
 // TableName names the fixture table.
 func (Item) TableName() string { return "items" }
@@ -83,6 +97,8 @@ func Open(t testing.TB) (*gorm.DB, *pgxpool.Pool) {
 		t.Fatal(err)
 	}
 	config.ConnConfig.RuntimeParams["search_path"] = schema
+	// Dates without a time zone (filter.createdAt=$btw:2024-01-02,...) mean the same on any server.
+	config.ConnConfig.RuntimeParams["timezone"] = "UTC"
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatal(err)

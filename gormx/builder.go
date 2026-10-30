@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 
@@ -13,44 +14,38 @@ import (
 	"github.com/svyatoslavratov/go-paginate"
 )
 
-// ConfigBuilder builds a paginate.Config from pointers to model and DTO fields instead of
-// hand-written names: &model.Title becomes "templates.title" through the GORM schema, &dto.Title
-// becomes its JSON name. A renamed field then breaks the build, not a request. A pointer the
-// builder cannot resolve is skipped and reported by Build.
-type ConfigBuilder struct {
-	db             *gorm.DB
-	tableName      string
-	modelPtr       any
-	dtoPtr         any
-	modelSchema    *schema.Schema
-	sortable       []string
-	searchable     []string
-	mapInputFields map[string]string
-	filterable     paginate.FilterableColumns
-	defaultSortBy  paginate.SortBy
-	// defaultSortKeys keeps the order of AddDefaultSort calls: the first key is the main one.
-	defaultSortKeys []string
-	// tieBreak is the primary key column of the model (empty for composite or unknown keys).
-	tieBreak string
-	errs     []error
+// Builder builds a paginate.Config from pointers to model and DTO fields instead of hand-written
+// names: &model.Title becomes the column "templates.title" through the GORM schema, &dto.Title its
+// JSON name, and the Go type of the model field the field's Type. A renamed field then breaks the
+// build, not a request. Use it when the model and the API type differ; ConfigOf reads tags from one
+// struct.
+//
+//	var model Template
+//	var dto TemplateDTO
+//	b := gormx.NewBuilder(db, "templates", &model, &dto)
+//	b.Field(&dto.ID, &model.ID)
+//	b.Field(&dto.Title, &model.Title).Sortable().Searchable().Filter(paginate.OpILike, paginate.OpSw)
+//	b.Field(&dto.CreatedAt, &model.CreatedAt).Sortable().Filter(paginate.OpBtw)
+//	b.DefaultSort(&dto.CreatedAt, paginate.Desc)
+//	cfg, err := b.Config()
+type Builder struct {
+	db          *gorm.DB
+	table       string
+	modelPtr    any
+	dtoPtr      any
+	modelSchema *schema.Schema
+	fields      []paginate.Field
+	defaultSort []paginate.Sort
+	tieBreak    string
+	errs        []error
 }
 
-// NewConfigBuilder starts a config for tableName, the table or alias the query selects from.
-// modelPtr and dtoPtr must be pointers to structs; the fields passed to the methods must belong to
-// them. db supplies the naming strategy; it is never queried.
-func NewConfigBuilder(db *gorm.DB, tableName string, modelPtr any, dtoPtr any) *ConfigBuilder {
-	b := &ConfigBuilder{
-		db:              db,
-		tableName:       tableName,
-		modelPtr:        modelPtr,
-		dtoPtr:          dtoPtr,
-		sortable:        make([]string, 0),
-		searchable:      make([]string, 0),
-		mapInputFields:  make(map[string]string),
-		filterable:      make(paginate.FilterableColumns),
-		defaultSortBy:   make(paginate.SortBy),
-		defaultSortKeys: make([]string, 0),
-	}
+// NewBuilder starts a config for table, the table or alias the query selects from. modelPtr and
+// dtoPtr must be pointers to structs, the same pointer when the model is the API type; the fields
+// passed to the methods must belong to them. db supplies the naming strategy and is never queried.
+// The tie-breaker is the model's primary key when it is a single column.
+func NewBuilder(db *gorm.DB, table string, modelPtr, dtoPtr any) *Builder {
+	b := &Builder{db: db, table: table, modelPtr: modelPtr, dtoPtr: dtoPtr}
 	switch {
 	case db == nil:
 		b.errs = append(b.errs, errors.New("builder: gorm db is required"))
@@ -63,68 +58,111 @@ func NewConfigBuilder(db *gorm.DB, tableName string, modelPtr any, dtoPtr any) *
 		}
 		b.modelSchema = parsed
 	}
-	b.tieBreak = primaryKeyColumn(tableName, b.modelSchema)
+	b.tieBreak = primaryKeyColumn(table, b.modelSchema)
 	return b
 }
 
-// primaryKeyColumn is "table.pk" for a single-column primary key; composite or missing keys
-// give no tie-breaker.
-func primaryKeyColumn(tableName string, parsed *schema.Schema) string {
-	if parsed == nil || parsed.PrioritizedPrimaryField == nil || len(parsed.PrimaryFields) != 1 {
-		return ""
-	}
-	if parsed.PrioritizedPrimaryField.DBName == "" {
-		return ""
-	}
-	return fmt.Sprintf("%s.%s", tableName, parsed.PrioritizedPrimaryField.DBName)
+// FieldBuilder sets what clients may do with a field of a Builder.
+type FieldBuilder struct {
+	b *Builder
+	// index is the field in b.fields, -1 for a field that did not resolve.
+	index int
 }
 
-// WithTieBreak sets the tie-breaker column explicitly (for example a unique slug instead of id).
-func (b *ConfigBuilder) WithTieBreak(fieldPtr any) *ConfigBuilder {
-	if column := b.Column(fieldPtr); column != "" {
+// Field adds the API field named by the JSON name of dtoField and reading the column of
+// modelField. A pointer that does not resolve leaves the field out and is reported by Config.
+func (b *Builder) Field(dtoField, modelField any) *FieldBuilder {
+	name := b.JSONName(dtoField)
+	column, goType := b.column(modelField)
+	if name == "" || column == "" {
+		return &FieldBuilder{b: b, index: -1}
+	}
+	b.fields = append(b.fields, paginate.Field{Name: name, Column: column, Type: paginate.TypeOf(goType)})
+	if b.modelSchema != nil {
+		markNotNull(b.fields[len(b.fields)-1:], b.table, b.modelSchema)
+	}
+	return &FieldBuilder{b: b, index: len(b.fields) - 1}
+}
+
+func (f *FieldBuilder) set(change func(field *paginate.Field)) *FieldBuilder {
+	if f.index >= 0 {
+		change(&f.b.fields[f.index])
+	}
+	return f
+}
+
+// Sortable lets clients sort by the field.
+func (f *FieldBuilder) Sortable() *FieldBuilder {
+	return f.set(func(field *paginate.Field) { field.Sortable = true })
+}
+
+// Searchable makes the field part of ?search=.
+func (f *FieldBuilder) Searchable() *FieldBuilder {
+	return f.set(func(field *paginate.Field) { field.Searchable = true })
+}
+
+// Filter makes the field filterable with $eq and the operators; paginate.AllOperators allows every
+// operator.
+func (f *FieldBuilder) Filter(operators ...paginate.Operator) *FieldBuilder {
+	return f.set(func(field *paginate.Field) {
+		field.Filter = []paginate.Operator{paginate.OpEq}
+		for _, operator := range operators {
+			if !slices.Contains(field.Filter, operator) {
+				field.Filter = append(field.Filter, operator)
+			}
+		}
+	})
+}
+
+// NotNull marks a column without NULL values that GORM does not know as NOT NULL; see
+// paginate.Field.NotNull.
+func (f *FieldBuilder) NotNull() *FieldBuilder {
+	return f.set(func(field *paginate.Field) { field.NotNull = true })
+}
+
+// Type sets the field's type instead of the one the Go type of the model field gives.
+func (f *FieldBuilder) Type(t paginate.Type) *FieldBuilder {
+	return f.set(func(field *paginate.Field) { field.Type = t })
+}
+
+// DefaultSort appends a key of the default sort; the first call is the main key.
+func (b *Builder) DefaultSort(dtoField any, order paginate.Order) *Builder {
+	if name := b.JSONName(dtoField); name != "" {
+		b.defaultSort = append(b.defaultSort, paginate.Sort{Field: name, Order: order})
+	}
+	return b
+}
+
+// TieBreak sets the tie-breaker column explicitly, for example a unique slug instead of the
+// primary key.
+func (b *Builder) TieBreak(modelField any) *Builder {
+	if column, _ := b.column(modelField); column != "" {
 		b.tieBreak = column
 	}
 	return b
 }
 
-// WithoutTieBreak turns the tie-breaker off (for example for queries with aggregates).
-func (b *ConfigBuilder) WithoutTieBreak() *ConfigBuilder {
+// WithoutTieBreak turns the tie-breaker off, for example for queries with aggregates.
+func (b *Builder) WithoutTieBreak() *Builder {
 	b.tieBreak = ""
 	return b
 }
 
-// Column returns "table.column" of a model field, or "" (and an error from Build) when the pointer is
-// not a column of the model: not one of its fields, a relation, or a field GORM ignores. Fields of
-// embedded structs (anonymous or tagged gorm:"embedded") are columns of the model.
-func (b *ConfigBuilder) Column(fieldPtr any) string {
-	if b == nil {
-		return ""
-	}
-	if b.db == nil {
-		return ""
-	}
-	path, err := fieldPath(b.modelPtr, fieldPtr)
-	if err != nil {
-		b.errs = append(b.errs, fmt.Errorf("builder: model %T: %w", b.modelPtr, err))
-		return ""
-	}
-	column, err := b.columnName(path)
-	if err != nil {
-		b.errs = append(b.errs, fmt.Errorf("builder: model %T: %w", b.modelPtr, err))
-		return ""
-	}
-	return fmt.Sprintf("%s.%s", b.tableName, column)
+// Column returns "table.column" of a model field, or "" (and an error from Config) when the
+// pointer is not a column of the model: not one of its fields, a relation, or a field GORM
+// ignores. Fields of embedded structs (anonymous or tagged gorm:"embedded") are columns of the
+// model.
+func (b *Builder) Column(modelField any) string {
+	column, _ := b.column(modelField)
+	return column
 }
 
 // JSONName returns the JSON name of a DTO field the way encoding/json names it: the json tag, or
 // the field name without one. Fields of nested structs get a dotted path ("author.name"), fields
-// of embedded structs are promoted. It returns "" (and an error from Build) when the pointer is not
-// a field of the DTO or the field is not serialized (json:"-").
-func (b *ConfigBuilder) JSONName(fieldPtr any) string {
-	if b == nil {
-		return ""
-	}
-	path, err := fieldPath(b.dtoPtr, fieldPtr)
+// of embedded structs are promoted. It returns "" (and an error from Config) when the pointer is
+// not a field of the DTO or the field is not serialized (json:"-").
+func (b *Builder) JSONName(dtoField any) string {
+	path, err := fieldPath(b.dtoPtr, dtoField)
 	if err == nil {
 		var name string
 		if name, err = jsonPath(path); err == nil {
@@ -135,101 +173,71 @@ func (b *ConfigBuilder) JSONName(fieldPtr any) string {
 	return ""
 }
 
-// AddSortable allows sorting by the model fields.
-func (b *ConfigBuilder) AddSortable(fieldPtrs ...any) *ConfigBuilder {
-	for _, fieldPtr := range fieldPtrs {
-		column := b.Column(fieldPtr)
-		if column == "" {
-			continue
-		}
-		b.sortable = append(b.sortable, column)
+// Config returns the fields, the default sort and the tie-breaker, and every pointer that did not
+// resolve, joined into one error. Set the rest (Format, limits) on the result, then Compile it.
+func (b *Builder) Config() (paginate.Config, error) {
+	cfg := paginate.Config{
+		Fields:      append([]paginate.Field(nil), b.fields...),
+		DefaultSort: append([]paginate.Sort(nil), b.defaultSort...),
+		TieBreak:    b.tieBreak,
 	}
-	return b
+	return cfg, errors.Join(b.errs...)
 }
 
-// AddSearchable makes the model fields part of the search.
-func (b *ConfigBuilder) AddSearchable(fieldPtrs ...any) *ConfigBuilder {
-	for _, fieldPtr := range fieldPtrs {
-		column := b.Column(fieldPtr)
-		if column == "" {
-			continue
-		}
-		b.searchable = append(b.searchable, column)
+// column resolves a model field to "table.column" and its Go type.
+func (b *Builder) column(modelField any) (string, reflect.Type) {
+	if b.db == nil {
+		return "", nil
 	}
-	return b
+	path, err := fieldPath(b.modelPtr, modelField)
+	if err != nil {
+		b.errs = append(b.errs, fmt.Errorf("builder: model %T: %w", b.modelPtr, err))
+		return "", nil
+	}
+	column, err := columnOf(b.db, b.table, b.modelSchema, path)
+	if err != nil {
+		b.errs = append(b.errs, fmt.Errorf("builder: model %T: %w", b.modelPtr, err))
+		return "", nil
+	}
+	return column, path[len(path)-1].Type
 }
 
-// AddDefaultSort appends a default sort key; the first call is the main key.
-func (b *ConfigBuilder) AddDefaultSort(fieldPtr any, order paginate.Order) *ConfigBuilder {
-	column := b.Column(fieldPtr)
-	if column == "" {
-		return b
+// primaryKeyColumn is "table.pk" for a single-column primary key; composite or missing keys give
+// no tie-breaker.
+func primaryKeyColumn(table string, parsed *schema.Schema) string {
+	if parsed == nil || parsed.PrioritizedPrimaryField == nil || len(parsed.PrimaryFields) != 1 {
+		return ""
 	}
-	if _, exists := b.defaultSortBy[column]; !exists {
-		b.defaultSortKeys = append(b.defaultSortKeys, column)
+	if parsed.PrioritizedPrimaryField.DBName == "" {
+		return ""
 	}
-	b.defaultSortBy[column] = order
-	return b
+	return table + "." + parsed.PrioritizedPrimaryField.DBName
 }
 
-// AddFilterable allows filtering the model field with the operators; $eq is always allowed, so no
-// operators means $eq only. paginate.AllOperators allows every operator.
-func (b *ConfigBuilder) AddFilterable(fieldPtr any, operators ...paginate.Operator) *ConfigBuilder {
-	column := b.Column(fieldPtr)
-	if column == "" {
-		return b
-	}
-	b.filterable[column] = append([]paginate.Operator{}, operators...)
-	return b
-}
-
-// MapField maps the JSON name of a DTO field (what clients send) to a model column.
-func (b *ConfigBuilder) MapField(dtoFieldPtr any, modelFieldPtr any) *ConfigBuilder {
-	key := b.JSONName(dtoFieldPtr)
-	column := b.Column(modelFieldPtr)
-	if key == "" || column == "" {
-		return b
-	}
-	b.mapInputFields[key] = column
-	return b
-}
-
-// Build returns the config and the pointers it could not resolve, joined into one error. The
-// config is usable either way: unresolved fields are left out of it.
-func (b *ConfigBuilder) Build() (paginate.Config, error) {
-	cfg := paginate.NewConfig(b.tableName, b.sortable, b.mapInputFields)
-	cfg.DefaultSortBy = b.defaultSortBy
-	cfg.DefaultSortKeys = b.defaultSortKeys
-	cfg.TieBreakColumn = b.tieBreak
-	cfg.SearchableColumns = b.searchable
-	cfg.FilterableColumns = b.filterable
-	return *cfg, errors.Join(b.errs...)
-}
-
-// columnName resolves a field path of the model to its column through the GORM schema.
-func (b *ConfigBuilder) columnName(path []reflect.StructField) (string, error) {
+// columnOf resolves a field path of the model to "table.column" through the GORM schema.
+func columnOf(db *gorm.DB, table string, parsed *schema.Schema, path []reflect.StructField) (string, error) {
 	names := make([]string, len(path))
 	for i, field := range path {
 		names[i] = field.Name
 	}
 	bindName := strings.Join(names, ".")
-	if b.modelSchema == nil {
-		// The model did not parse (Err says why): only the naming strategy is left.
-		return b.db.NamingStrategy.ColumnName(b.tableName, names[len(names)-1]), nil
+	if parsed == nil {
+		// The model did not parse (Config says why): only the naming strategy is left.
+		return table + "." + db.NamingStrategy.ColumnName(table, names[len(names)-1]), nil
 	}
 	for _, parent := range path[:len(path)-1] {
 		if !parent.Anonymous && !isGormEmbedded(parent) {
 			return "", fmt.Errorf("field %s is inside %s, which is neither embedded nor tagged gorm:\"embedded\"", bindName, parent.Name)
 		}
 	}
-	field := b.modelSchema.FieldsByBindName[bindName]
+	field := parsed.FieldsByBindName[bindName]
 	if field == nil {
-		field = b.modelSchema.LookUpField(names[len(names)-1])
+		field = parsed.LookUpField(names[len(names)-1])
 	}
 	if field == nil || field.DBName == "" {
 		return "", fmt.Errorf("field %s is not a column", bindName)
 	}
-	return field.DBName, nil
+	return table + "." + field.DBName, nil
 }
 
 func isGormEmbedded(field reflect.StructField) bool {

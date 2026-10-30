@@ -25,47 +25,52 @@ itself, with none of the checks.
 ## Results
 
 Apple M3 Pro, macOS, Go 1.26, Postgres 17 in Docker Desktop. The machine was busy with other work
-while the benchmarks ran, so treat the times as rough. Allocations do not depend on the load and
+while the benchmarks ran, so the times are scaled to a quiet run by the parser benchmarks, whose
+code did not change between the two: treat them as rough. Allocations do not depend on the load and
 are exact. The library and the hand-written code ran in turns, so their ratio is fair.
 
 ### The library alone
 
+`Prepare` runs on a compiled `Endpoint`: the config was checked once, at `Compile`.
+
 | Benchmark | Time | Allocations | Memory |
 |---|---:|---:|---:|
-| `ParseRequest`: the typical query string into a `Request` | 1.2 µs | 22 | 1.6 KiB |
-| `Prepare`: an empty request | 1.4 µs | 36 | 1.9 KiB |
-| `Prepare`: the typical request | 4.6 µs | 109 | 5.9 KiB |
-| `Prepare`: the typical request with a `filter=` expression | 6.5 µs | 170 | 8.3 KiB |
-| `Prepare`: a `filter=` expression of 99 nodes, just under the cap | 20 µs | 607 | 27.5 KiB |
-| `Prepare`: `$in` with 1000 values, the cap | 32 µs | 1054 | 75.2 KiB |
+| `ParseRequest`: the typical query string into a `Request` | 1.3 µs | 22 | 1.3 KiB |
+| `Prepare`: an empty request | 0.3 µs | 9 | 632 B |
+| `Prepare`: the typical request | 2.8 µs | 77 | 4.0 KiB |
+| `Prepare`: the typical request with a `filter=` expression | 5 µs | 138 | 6.3 KiB |
+| `Prepare`: a `filter=` expression of 99 nodes, just under the cap | 20 µs | 580 | 26.2 KiB |
+| `Prepare`: `$in` with 1000 integers, the cap, each checked against the field's type | 46 µs | 1024 | 73.6 KiB |
 | Parsing the expression of the typical request | 0.8 µs | 30 | 984 B |
 | Parsing an expression with quoted values | 0.4 µs | 17 | 520 B |
 | Parsing an expression of 99 nodes | 9.2 µs | 315 | 14.3 KiB |
-| `NewResponse` and `json.Marshal` of 20 rows | 16.5 µs | 88 | 8.3 KiB |
-| The same with `FormatNestJS`, links included | 21.7 µs | 94 | 10.6 KiB |
+| `NewResponse` and `json.Marshal` of 20 rows | 19 µs | 92 | 9.0 KiB |
+| The same with `FormatNestJS`, links included | 22 µs | 103 | 11.3 KiB |
 
 ### With the library and by hand
 
 Both sides start from the query string and end with the SQL or the rows; the library's side
-includes `ParseRequest` and `Prepare`. The ratio is the median of ten runs in turns.
+includes `ParseRequest` and `Prepare`. The ratio is the median of runs in turns.
 
 | What | Library | Hand-written | Library / hand-written |
 |---|---|---|---:|
-| squirrel: the count and the page as SQL ([`squirrelx.Statements`](../squirrelx)) | 17.2 µs, 297 allocations | 16.1 µs, 300 allocations | 0.95 |
-| GORM: the count and the page in dry-run mode ([`gormx.Paginate`](../gormx)) | 15.1 µs, 323 allocations | 9.1 µs, 184 allocations | 1.87 |
-| Postgres through GORM: 10 000 rows, count and page | 867 allocations | 717 allocations | 0.97 |
-| Postgres through squirrel and pgx | 637 allocations | 572 allocations | 1.04 |
+| squirrel: the count and the page as SQL ([`squirrelx.Statements`](../squirrelx)) | 17 µs, 265 allocations | 19 µs, 300 allocations | 0.87 |
+| GORM: the count and the page in dry-run mode ([`gormx.Paginate`](../gormx)) | 18 µs, 304 allocations | 11 µs, 184 allocations | 1.64 |
+| Postgres through GORM: 10 000 rows, count and page | 845 allocations | 717 allocations | 1.01 |
+| Postgres through squirrel and pgx | 608 allocations | 572 allocations | 1.04 |
 
 On Postgres one request took 4 to 25 ms on this machine, depending on its load, with the library
-and without it alike.
+and without it alike; the ratios of the Postgres rows are the medians of paired runs.
 
 ### Reading the numbers
 
-- What the library adds is parsing and checking the request: about 6 µs and 140 allocations for
-  the typical request. That is the whole difference with GORM.
-- With squirrel the difference disappears: squirrel's own rendering dominates, and the library
-  hands it finished conditions instead of `squirrel.Eq` and `squirrel.ILike` values.
+- What the library adds is parsing and checking the request: a few microseconds and about 100
+  allocations for the typical request. That is the whole difference with GORM.
+- With squirrel the library is cheaper than the hand-written code: squirrel's own rendering
+  dominates, and the library hands it finished conditions instead of `squirrel.Eq` and
+  `squirrel.ILike` values.
 - On a database the library is noise: the query takes milliseconds, the library microseconds.
+- Checking values against types costs little: a list of 1000 integers is the worst case.
 - The caps bound the worst case. The largest request the default caps admit, a 100-node expression
   or a list of 1000 values, takes tens of microseconds and less than 100 KiB.
 

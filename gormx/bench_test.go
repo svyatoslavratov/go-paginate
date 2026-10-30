@@ -28,7 +28,7 @@ func BenchmarkDryRun(b *testing.B) {
 		b.Fatal(err)
 	}
 	r := httptest.NewRequest(http.MethodGet, "/products?"+benchdata.Query, nil)
-	cfg := benchdata.Config()
+	endpoint := benchdata.Endpoint()
 	ctx := context.Background()
 
 	b.Run("library", func(b *testing.B) {
@@ -38,7 +38,7 @@ func BenchmarkDryRun(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			if _, err := gormx.Paginate[benchdata.Product](ctx, *req, cfg, db.Model(&benchdata.Product{})); err != nil {
+			if _, err := gormx.Paginate[benchdata.Product](ctx, *req, endpoint, db.Model(&benchdata.Product{})); err != nil {
 				b.Fatal(err)
 			}
 		}

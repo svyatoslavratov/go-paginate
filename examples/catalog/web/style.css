@@ -153,6 +153,9 @@ button:disabled { opacity: 0.45; cursor: default; }
 }
 .filter-row .value { flex: 1 1 120px; }
 .filter-row .remove { background: transparent; border-color: var(--line); color: var(--muted); }
+.filter-row.invalid { padding: 6px; margin: -6px; border-radius: 10px; background: var(--danger-soft); }
+.filter-row.invalid select, .filter-row.invalid .value { border-color: var(--danger); }
+select:disabled { opacity: 0.5; }
 
 .expression { margin-top: 16px; }
 .expression input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }

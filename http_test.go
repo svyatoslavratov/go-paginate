@@ -23,13 +23,16 @@ func TestParseQuery(t *testing.T) {
 	}{
 		{
 			name:  "nestjs-paginate parameters",
-			query: "page=2&limit=10&sortBy=name:DESC&sortBy=id:asc&search=milo&searchBy=name&searchBy=email&filter.age=$gt:3&filter.age=$or:$null&filter.name=",
+			query: "page=2&limit=10&sortBy=name:DESC&sortBy=id:asc&search=milo&searchBy=name&searchBy=email&filter.age=$gt:3&filter.age=$or:$null&filter.name=&cursor=abc",
 			check: func(t *testing.T, req *Request) {
 				if req.Page != 2 || req.Limit != 10 {
 					t.Fatalf("page/limit: %d/%d", req.Page, req.Limit)
 				}
-				if !reflect.DeepEqual(req.SortBy, SortBy{"name": Desc, "id": Asc}) || !reflect.DeepEqual(req.SortKeys, []string{"name", "id"}) {
-					t.Fatalf("sortBy: %v %v", req.SortBy, req.SortKeys)
+				if !reflect.DeepEqual(req.SortBy, []Sort{{"name", Desc}, {"id", Asc}}) {
+					t.Fatalf("sortBy: %v", req.SortBy)
+				}
+				if req.Cursor != "abc" {
+					t.Fatalf("cursor: %q", req.Cursor)
 				}
 				if req.Search != "milo" || !reflect.DeepEqual(req.SearchBy, []string{"name", "email"}) {
 					t.Fatalf("search: %q %v", req.Search, req.SearchBy)

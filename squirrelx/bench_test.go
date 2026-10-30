@@ -17,7 +17,7 @@ import (
 func BenchmarkStatements(b *testing.B) {
 	r := httptest.NewRequest(http.MethodGet, "/products?"+benchdata.Query, nil)
 	base := squirrel.Select(benchdata.Columns...).From("products")
-	cfg := benchdata.Config()
+	endpoint := benchdata.Endpoint()
 
 	b.Run("library", func(b *testing.B) {
 		b.ReportAllocs()
@@ -26,7 +26,7 @@ func BenchmarkStatements(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			if _, _, err := squirrelx.Statements(base, req, cfg); err != nil {
+			if _, err := squirrelx.Statements(base, req, endpoint); err != nil {
 				b.Fatal(err)
 			}
 		}

@@ -5,7 +5,7 @@ PG_PORT := 55432
 PG_IMAGE ?= postgres:17-alpine
 TEST_PG_DSN := postgres://postgres:test@127.0.0.1:$(PG_PORT)/paginate?sslmode=disable
 FUZZ_TIME ?= 30s
-FUZZ_TARGETS := FuzzParseFilterExpression FuzzParseFilterToken FuzzParseSortBy FuzzParseQuery
+FUZZ_TARGETS := FuzzParseFilterExpression FuzzParseFilterToken FuzzParseSortBy FuzzParseQuery FuzzCursor
 
 .PHONY: test test-pg cover bench bench-pg fuzz lint vuln tidy demo demo-up
 

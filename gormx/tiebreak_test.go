@@ -35,6 +35,12 @@ func TestTieBreakAllowed(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "group by several columns in one raw clause",
+			stmt:   &gorm.Statement{Clauses: groupBy(clause.Column{Name: "templates.title, templates.id", Raw: true})},
+			column: "templates.id",
+			want:   true,
+		},
+		{
 			name:   "group by short column name",
 			stmt:   &gorm.Statement{Clauses: groupBy(clause.Column{Name: "id"})},
 			column: "templates.id",

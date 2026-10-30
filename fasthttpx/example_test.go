@@ -19,5 +19,5 @@ func ExampleParseRequest() {
 	}
 	fmt.Println(req.Page, req.Limit, req.SortBy, req.Filter, req.Path)
 	// Output:
-	// 2 10 map[name:desc] map[status:[$in:active,invited]] /users
+	// 2 10 [{name DESC}] map[status:[$in:active,invited]] /users
 }

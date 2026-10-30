@@ -2,6 +2,9 @@
 // server; the browser engine runs the same Go code compiled to WebAssembly and the same SQL in
 // PGlite, Postgres compiled to WebAssembly, so the demo also works as a static page. The page
 // names its engine in <meta name="demo-engine">: "make demo" sets "browser" for the static build.
+//
+// Every engine answers { status, body, sql }: the HTTP status, the JSON body (an answer, or an
+// error with code, field and message) and the statements that ran, each with a label.
 
 const PGLITE = 'https://cdn.jsdelivr.net/npm/@electric-sql/pglite@0.5.10/dist/index.js';
 
@@ -22,7 +25,7 @@ async function serverEngine() {
         fetch(`api/products?${query}`),
         fetch(`api/products/sql?${query}`),
       ]);
-      const statements = sql.ok ? await sql.json() : {};
+      const statements = sql.ok ? await sql.json() : [];
       return { status: answer.status, body: await answer.json(), sql: statements };
     },
   };
@@ -49,26 +52,44 @@ async function browserEngine(progress) {
     async query(query) {
       const prepared = JSON.parse(api.prepare(query));
       if (prepared.error) {
-        return { status: prepared.status, body: { message: prepared.error }, sql: {} };
+        return { status: prepared.status, body: prepared.error, sql: [] };
       }
-      const sql = { count: prepared.count.text, select: prepared.select?.text };
+      const sql = [];
       try {
-        const counted = await db.query(prepared.count.sql, prepared.count.args);
-        const total = Number(counted.rows[0].total);
-        let rows = [];
-        if (prepared.select) {
-          rows = (await db.query(prepared.select.sql, prepared.select.args)).rows;
+        let total = 0;
+        let count = 'none';
+        if (prepared.estimate) {
+          sql.push({ label: 'the estimate', sql: prepared.estimate.text });
+          const plan = await db.query(prepared.estimate.sql, prepared.estimate.args);
+          const estimate = api.estimate(JSON.stringify(plan.rows[0]['QUERY PLAN']));
+          if (estimate >= prepared.exactCountBelow) {
+            total = estimate;
+            count = 'estimate';
+          }
         }
-        const body = JSON.parse(api.respond(query, JSON.stringify(rows), total));
+        if (prepared.count && count !== 'estimate') {
+          sql.push({ label: 'the count', sql: prepared.count.text });
+          total = Number((await db.query(prepared.count.sql, prepared.count.args)).rows[0].total);
+          count = 'exact';
+        }
+        let rows = [];
+        if (prepared.page) {
+          sql.push({ label: 'the page', sql: prepared.page.text });
+          rows = (await db.query(prepared.page.sql, prepared.page.args)).rows;
+        }
+        const body = JSON.parse(api.respond(query, JSON.stringify(rows), total, count));
+        if (body.error) {
+          return { status: body.status, body: body.error, sql };
+        }
         return { status: 200, body, sql };
       } catch (error) {
         // A value of the wrong type is a data exception (SQLSTATE 22): the client's mistake, as
         // Query.WrapError reports it on the server.
         if (String(error.code ?? '').startsWith('22')) {
-          const message = `paginate: invalid request: invalid filter value: ${error.message} (SQLSTATE ${error.code})`;
-          return { status: 400, body: { message }, sql };
+          const message = `invalid filter value: ${error.message} (SQLSTATE ${error.code})`;
+          return { status: 400, body: { code: 'invalid_value', message }, sql };
         }
-        return { status: 500, body: { message: error.message }, sql };
+        return { status: 500, body: { code: 'internal', message: error.message }, sql };
       }
     },
   };

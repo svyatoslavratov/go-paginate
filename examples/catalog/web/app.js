@@ -12,12 +12,14 @@ const PRESETS = [
   ['OR within a field', [['filter.price', '$lt:10'], ['filter.price', '$or:$gt:490']]],
   ['Tags contain both', [['filter.tags', '$contains:sale,eco']]],
   ['No rating', [['filter.rating', '$null']]],
-  ['Rated, on sale', [['filter.rating', '$not:$null'], ['filter.discontinuedAt', '$null'], ['sortBy', 'rating:DESC']]],
-  ['Released in 2024', [['filter.releasedAt', '$btw:2024-01-01,2024-12-31'], ['sortBy', 'releasedAt:ASC']]],
   ['Two sort keys, nulls last', [['sortBy', 'rating:DESC'], ['sortBy', 'price:ASC']]],
+  ['Cursor pages', [['pages', 'cursor'], ['sortBy', 'rating:DESC']]],
+  ['No count', [['count', 'none'], ['limit', '20']]],
+  ['An estimate', [['count', 'estimate']]],
   ['Count only', [['limit', '0'], ['filter.category', '$in:seating']]],
   ['Every row', [['limit', '-1'], ['filter.brand', '$sw:lu']]],
   ['400: not a number', [['filter.price', '$gt:abc']]],
+  ['400: not in the enum', [['filter.category', '$in:lighting,garden']]],
   ['400: operator not allowed', [['filter.sku', '$ilike:84']]],
 ];
 
@@ -49,13 +51,15 @@ let sequence = 0;
 let typing;
 
 function initialState(format = 'nestjs') {
-  return { page: 1, limit: LIMIT, format, search: '', searchBy: [], sortBy: [], filters: [], expression: '' };
+  return { page: 1, cursor: '', limit: LIMIT, format, pages: 'numbers', count: 'exact', search: '', searchBy: [], sortBy: [], filters: [], expression: '' };
 }
 
 // The query string.
 
 function toQuery(s) {
-  const params = [['page', String(s.page)], ['limit', s.limit]];
+  const params = [];
+  if (s.pages !== 'cursor') params.push(['page', String(s.page)]);
+  params.push(['limit', s.limit]);
   for (const [field, order] of s.sortBy) params.push(['sortBy', `${field}:${order}`]);
   if (s.search) params.push(['search', s.search]);
   for (const field of s.searchBy) params.push(['searchBy', field]);
@@ -64,7 +68,11 @@ function toQuery(s) {
     if (token !== null) params.push([`filter.${filter.field}`, token]);
   }
   if (s.expression.trim()) params.push(['filter', s.expression.trim()]);
+  if (s.pages === 'cursor' && s.cursor) params.push(['cursor', s.cursor]);
+  // The demo's own parameters: they pick the endpoint the server answers with.
   if (s.format === 'default') params.push(['format', 'default']);
+  if (s.pages === 'cursor') params.push(['pages', 'cursor']);
+  if (s.count !== 'exact') params.push(['count', s.count]);
   return encode(params);
 }
 
@@ -73,6 +81,9 @@ function fromQuery(query, format) {
   const s = initialState(params.get('format') === 'default' ? 'default' : format ?? 'nestjs');
   s.page = Math.max(1, Number.parseInt(params.get('page'), 10) || 1);
   s.limit = params.get('limit') ?? LIMIT;
+  s.pages = params.get('pages') === 'cursor' ? 'cursor' : 'numbers';
+  s.count = ['estimate', 'none'].includes(params.get('count')) ? params.get('count') : 'exact';
+  s.cursor = params.get('cursor') ?? '';
   s.search = params.get('search') ?? '';
   s.searchBy = params.getAll('searchBy');
   s.sortBy = params.getAll('sortBy').map((value) => {
@@ -130,7 +141,10 @@ function encode(params) {
 // Navigation.
 
 function commit({ push = false, keepPage = false } = {}) {
-  if (!keepPage) state.page = 1;
+  if (!keepPage) {
+    state.page = 1;
+    state.cursor = '';
+  }
   const query = toQuery(state);
   if (query !== location.hash.slice(1)) {
     history[push ? 'pushState' : 'replaceState'](null, '', `#${query}`);
@@ -166,7 +180,7 @@ async function load(query) {
   try {
     answer = await engine.query(query);
   } catch (error) {
-    answer = { status: 0, body: { message: error.message }, sql: {} };
+    answer = { status: 0, body: { code: 'internal', message: error.message }, sql: [] };
   }
   if (current !== sequence) return;
   render(answer, Math.round(performance.now() - started));
@@ -178,25 +192,39 @@ function render({ status, body, sql }, ms) {
   const failed = status !== 200;
   const statusBox = $('status');
   statusBox.classList.toggle('error', failed);
+  for (const row of document.querySelectorAll('.filter-row.invalid')) row.classList.remove('invalid');
   if (failed) {
-    statusBox.textContent = `${status || 'Error'}: ${body.message}`;
+    // The error names the field it is about: the page marks its filters.
+    const field = body.field ? ` · ${body.field}` : '';
+    statusBox.textContent = `${status || 'Error'} ${body.code ?? ''}${field}: ${body.message}`;
+    for (const row of document.querySelectorAll('.filter-row')) {
+      if (body.field && row.dataset.field === body.field) row.classList.add('invalid');
+    }
     renderTable(null);
     $('pager').replaceChildren();
-    $('sql').textContent = sql.count ? sqlText(sql) : '-- no SQL: the request did not pass the checks';
+    $('sql').textContent = sql.length ? sqlText(sql) : '-- no SQL: the request did not pass the checks';
     $('meta').textContent = JSON.stringify(body, null, 2);
     return;
   }
   const { meta, links } = body;
-  statusBox.textContent = `${meta.totalItems} matching · ${engine.label} · ${ms} ms`;
+  statusBox.textContent = `${summary(meta, sql)} · ${engine.label} · ${ms} ms`;
   renderTable(body);
   renderPager(meta, links);
   $('sql').textContent = sqlText(sql);
   $('meta').textContent = JSON.stringify(links ? { meta, links } : { meta }, null, 2);
 }
 
-function sqlText({ count, select }) {
-  const page = select ?? '-- limit=0 asks for the count only: no page is selected';
-  return `-- the count\n${count}\n\n-- the page\n${page}`;
+// summary tells how many rows match: counted, estimated, or not counted at all.
+function summary(meta, sql) {
+  if (meta.totalItems === undefined) return state.pages === 'cursor' ? 'Not counted: cursor pages' : 'Not counted';
+  const estimated = meta.estimated === true || (state.count === 'estimate' && !sql.some((statement) => statement.label === 'the count'));
+  if (estimated) return `≈ ${meta.totalItems} matching (the planner's estimate)`;
+  return `${meta.totalItems} matching`;
+}
+
+function sqlText(statements) {
+  if (!statements.length) return '-- no SQL';
+  return statements.map(({ label, sql }) => `-- ${label}\n${sql}`).join('\n\n');
 }
 
 // The table.
@@ -204,20 +232,19 @@ function sqlText({ count, select }) {
 function renderTable(body) {
   const table = $('table');
   const sort = effectiveSort(body?.meta);
-  const head = el('tr', {}, ...fields.map((field) => headerCell(field, sort)));
-  table.tHead.replaceChildren(head);
+  table.tHead.replaceChildren(el('tr', {}, ...fields.map((field) => headerCell(field, sort))));
 
   const rows = body?.data ?? [];
   if (rows.length === 0) {
-    const text = !body ? 'No answer.' : body.meta.totalItems && state.limit === '0' ? 'limit=0: the count only, no rows.' : 'No rows match.';
+    const text = !body ? 'No answer.' : state.limit === '0' ? 'limit=0: the count only, no rows.' : 'No rows match.';
     table.tBodies[0].replaceChildren(el('tr', {}, el('td', { class: 'empty', colspan: fields.length }, text)));
     return;
   }
   table.tBodies[0].replaceChildren(...rows.map((row) => el('tr', {}, ...fields.map((field) => dataCell(field, row[field.name])))));
 }
 
-// effectiveSort is what the rows are sorted by: the client's keys, or the default the server
-// reports in the nestjs meta.
+// effectiveSort is what the rows are sorted by: the client's keys, or the default the answer
+// reports in meta.sortBy.
 function effectiveSort(meta) {
   if (state.sortBy.length) return { keys: state.sortBy, isDefault: false };
   if (Array.isArray(meta?.sortBy)) return { keys: meta.sortBy, isDefault: true };
@@ -274,8 +301,8 @@ function dataCell(field, value) {
   }
 }
 
-// The pager follows the links of the nestjs answer; the default answer has none, so it counts
-// pages from the meta.
+// The pager follows the links of the nestjs answer, or the meta of the default one: page numbers,
+// or the cursors of the neighboring pages.
 
 function renderPager(meta, links) {
   const pager = $('pager');
@@ -283,31 +310,51 @@ function renderPager(meta, links) {
     pager.replaceChildren(el('span', { class: 'info' }, state.limit === '0' ? 'The count only.' : `Every row: ${meta.totalItems}.`));
     return;
   }
-  const page = meta.currentPage;
-  const pages = meta.totalPages;
-  const target = (name, fallback) => {
-    if (links) return links[name] ? Number(new URLSearchParams(links[name].split('?')[1]).get('page')) : null;
-    return fallback >= 1 && fallback <= pages && fallback !== page ? fallback : null;
-  };
-  const button = (label, name, fallback) => {
-    const to = target(name, fallback);
-    const node = el('button', { type: 'button', class: 'ghost', title: links?.[name] ?? '' }, label);
-    node.disabled = to === null;
+  const go = (label, target, title) => {
+    const node = el('button', { type: 'button', class: 'ghost', title: title ?? '' }, label);
+    node.disabled = target === null;
     node.addEventListener('click', () => {
-      state.page = to;
+      Object.assign(state, target);
       commit({ push: true, keepPage: true });
     });
     return node;
   };
+
+  if (state.pages === 'cursor') {
+    const cursorOf = (name, has, cursor) => {
+      if (links) return links[name] ? { cursor: new URLSearchParams(links[name].split('?')[1]).get('cursor') ?? '' } : null;
+      return has ? { cursor: cursor ?? '' } : null;
+    };
+    pager.replaceChildren(
+      el('span', { class: 'info' }, `Cursor pages · ${meta.itemsPerPage} per page · no count, no page numbers`),
+      el(
+        'span',
+        { class: 'buttons' },
+        go('« First', state.cursor ? { cursor: '' } : null),
+        go('‹ Previous', cursorOf('previous', meta.hasPreviousPage, meta.previousCursor), links?.previous),
+        go('Next ›', cursorOf('next', meta.hasNextPage, meta.nextCursor), links?.next),
+      ),
+    );
+    return;
+  }
+
+  const page = meta.currentPage;
+  const pages = meta.totalPages;
+  const counted = pages !== undefined;
+  const target = (name, fallback, has) => {
+    if (links) return links[name] ? { page: Number(new URLSearchParams(links[name].split('?')[1]).get('page')) } : null;
+    return has ? { page: fallback } : null;
+  };
+  const of = counted ? ` of ${state.count === 'estimate' ? '≈ ' : ''}${Math.max(pages, 1)}` : '';
   pager.replaceChildren(
-    el('span', { class: 'info' }, `Page ${page} of ${Math.max(pages, 1)} · ${meta.itemsPerPage} per page`),
+    el('span', { class: 'info' }, `Page ${page}${of} · ${meta.itemsPerPage} per page`),
     el(
       'span',
       { class: 'buttons' },
-      button('« First', 'first', 1),
-      button('‹ Previous', 'previous', page - 1),
-      button('Next ›', 'next', page + 1),
-      button('Last »', 'last', pages),
+      go('« First', target('first', 1, page > 1), links?.first),
+      go('‹ Previous', target('previous', page - 1, page > 1), links?.previous),
+      go('Next ›', target('next', page + 1, meta.hasNextPage ?? (counted && page < pages)), links?.next),
+      go('Last »', target('last', pages, counted && page < pages && state.count === 'exact'), links?.last),
     ),
   );
 }
@@ -317,6 +364,9 @@ function renderPager(meta, links) {
 function renderControls() {
   $('search').value = state.search;
   $('format').value = state.format;
+  $('pages').value = state.pages;
+  $('count').value = state.count;
+  $('count').disabled = state.pages === 'cursor';
   const limit = $('limit');
   if (![...limit.options].some((option) => option.value === state.limit)) {
     limit.append(el('option', { value: state.limit }, state.limit));
@@ -379,6 +429,8 @@ function filterRow(filter) {
   const value = el('input', { class: 'value', autocomplete: 'off', spellcheck: 'false' });
   value.value = filter.value;
   value.placeholder = PLACEHOLDERS[filter.operator] ?? known?.example ?? '';
+  // An enum suggests its values.
+  if (known?.values?.length) value.setAttribute('list', `values-${known.name}`);
   value.disabled = filter.operator === '$null';
   if (value.disabled) value.placeholder = 'no value';
   value.addEventListener('input', () => {
@@ -393,7 +445,7 @@ function filterRow(filter) {
     commit({ push: true });
   });
 
-  return el('div', { class: 'filter-row' }, join, fieldSelect, el('label', { class: 'toggle' }, not, '$not'), operatorSelect, value, remove);
+  return el('div', { class: 'filter-row', 'data-field': filter.field }, join, fieldSelect, el('label', { class: 'toggle' }, not, '$not'), operatorSelect, value, remove);
 }
 
 function setupControls() {
@@ -406,6 +458,9 @@ function setupControls() {
     });
     searchBy.append(el('label', { class: 'toggle', title: 'None checked: every searchable field' }, box, field.name));
   }
+  for (const field of fields.filter((field) => field.values?.length)) {
+    document.body.append(el('datalist', { id: `values-${field.name}` }, ...field.values.map((value) => el('option', { value }))));
+  }
 
   $('search').addEventListener('input', (event) => {
     state.search = event.target.value;
@@ -415,14 +470,13 @@ function setupControls() {
     state.expression = event.target.value;
     commitSoon();
   });
-  $('limit').addEventListener('change', (event) => {
-    state.limit = event.target.value;
-    commit({ push: true });
-  });
-  $('format').addEventListener('change', (event) => {
-    state.format = event.target.value;
-    commit({ push: true, keepPage: true });
-  });
+  for (const id of ['limit', 'format', 'pages', 'count']) {
+    $(id).addEventListener('change', (event) => {
+      state[id] = event.target.value;
+      $('count').disabled = state.pages === 'cursor';
+      commit({ push: true, keepPage: id === 'format' });
+    });
+  }
   $('addFilter').addEventListener('click', () => {
     const field = fields.find((candidate) => candidate.filterable);
     state.filters.push({ field: field.name, or: false, not: false, operator: field.operators[0], value: '' });

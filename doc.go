@@ -1,43 +1,49 @@
 // Package paginate adds pagination, sorting, search and filtering to Go list endpoints, with the
-// query language of nestjs-paginate: page, limit, sortBy, search, searchBy, filter.<field> and
-// filter=<expression>, answered with {data, meta} and, optionally, nestjs-paginate's meta and
-// links.
+// query language of nestjs-paginate: page, limit, sortBy, search, searchBy, filter.<field>,
+// filter=<expression> and cursor, answered with {data, meta} and, optionally, nestjs-paginate's
+// meta and links.
 //
-// The package itself has no dependencies. It parses requests (ParseRequest for net/http,
-// ParseQuery for anything else), checks them against a Config and renders them for SQL (Prepare).
-// Executors run the result:
+// The package itself has no dependencies. A Config describes an endpoint: its fields (the column,
+// the type and what clients may do with each), how it pages (page numbers or cursors) and counts
+// (exactly, by estimate, or not at all). Compile checks it once and builds an Endpoint. Per
+// request, ParseRequest (net/http) or ParseQuery (anything else) reads the query string,
+// Endpoint.Prepare checks it and renders SQL, an executor runs it, and NewResponse builds the
+// answer:
 //
-//   - gormx runs it on GORM and builds configs from models;
-//   - squirrelx runs it on a squirrel select with pgx;
+//   - gormx runs requests on GORM and builds configs from GORM models;
+//   - squirrelx runs them on a squirrel select with pgx;
 //   - fasthttpx parses fasthttp requests.
 //
 // A minimal endpoint:
 //
-//	var usersPage = func() paginate.Config {
-//		cfg := paginate.NewConfig("users", []string{"users.created_at", "users.name"}, map[string]string{
-//			"createdAt": "users.created_at",
-//			"name":      "users.name",
-//			"status":    "users.status",
-//		})
-//		cfg.FilterableColumns = paginate.FilterableColumns{"users.status": {paginate.OpIn}}
-//		cfg.TieBreakColumn = "users.id"
-//		return *cfg
-//	}()
+//	var usersEndpoint = paginate.MustCompile(paginate.Config{
+//		Fields: []paginate.Field{
+//			{Name: "createdAt", Column: "users.created_at", Type: paginate.Time, Sortable: true},
+//			{Name: "name", Column: "users.name", Sortable: true, Searchable: true},
+//			{Name: "status", Column: "users.status", Type: paginate.Enum("active", "invited"),
+//				Filter: []paginate.Operator{paginate.OpIn}},
+//		},
+//		TieBreak: "users.id",
+//	})
 //
 //	func listUsers(w http.ResponseWriter, r *http.Request) {
 //		req, err := paginate.ParseRequest(r)
 //		if err != nil {
-//			http.Error(w, err.Error(), http.StatusBadRequest)
+//			writeError(w, err) // HTTPStatus(err) is 400 for the client's mistakes, 500 otherwise
 //			return
 //		}
-//		page, err := gormx.Paginate[User](r.Context(), *req, usersPage, db.Model(&User{}))
-//		if errors.Is(err, paginate.ErrInvalidRequest) {
-//			http.Error(w, err.Error(), http.StatusBadRequest)
+//		page, err := gormx.Paginate[User](r.Context(), *req, usersEndpoint, db.Model(&User{}))
+//		if err != nil {
+//			writeError(w, err)
 //			return
 //		}
 //		...
 //	}
 //
-// Clients reach only the fields, columns and operators the Config lists, every value is a bind
-// parameter, and a unique tie-breaker column ends every ORDER BY, so pages are stable.
+// The fields can also come from struct tags (ConfigOf): `paginate:"sort;search;filter:$in"`.
+//
+// Clients reach only the fields and operators the endpoint lists, values are checked against the
+// fields' types and passed as bind parameters, and a unique tie-breaker column ends every ORDER
+// BY, so pages are stable. Errors of the client are *Error values with a code and the field they
+// are about, ready to be the JSON of a 400.
 package paginate

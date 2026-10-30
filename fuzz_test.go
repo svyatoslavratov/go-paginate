@@ -16,29 +16,29 @@ import (
 // Run one target for a while with: go test -run='^$' -fuzz=FuzzParseQuery -fuzztime=1m .
 
 func fuzzConfig() Config {
-	cfg := NewConfig("t", []string{"t.id", "t.name", "t.price", "t.created_at"}, map[string]string{
-		"id":        "t.id",
-		"name":      "t.name",
-		"price":     "t.price",
-		"tags":      "t.tags",
-		"createdAt": "t.created_at",
-		"author":    "a.name",
-	})
-	cfg.SearchableColumns = []string{"t.name", "a.name"}
-	cfg.FilterableColumns = FilterableColumns{
-		"t.id":         AllOperators,
-		"t.name":       AllOperators,
-		"t.price":      AllOperators,
-		"t.tags":       AllOperators,
-		"t.created_at": AllOperators,
-		"a.name":       {},
+	return Config{
+		Fields: []Field{
+			{Name: "id", Column: "t.id", Type: Int, Sortable: true, Filter: AllOperators},
+			{Name: "name", Column: "t.name", Sortable: true, Searchable: true, Filter: AllOperators},
+			{Name: "price", Column: "t.price", Type: Number, Sortable: true, Filter: AllOperators},
+			{Name: "tags", Column: "t.tags", Type: ArrayOf(Text), Filter: []Operator{OpContains, OpNull}},
+			{Name: "createdAt", Column: "t.created_at", Type: Time, Sortable: true, Filter: AllOperators},
+			{Name: "author", Column: "a.name", Searchable: true, Filter: []Operator{OpEq}},
+		},
+		TieBreak:                "t.id",
+		MultiWordSearch:         true,
+		AllowDisabledPagination: true,
+		AllowWithDeletedInQuery: true,
+		Format:                  FormatNestJS,
 	}
-	cfg.TieBreakColumn = "t.id"
-	cfg.MultiWordSearch = true
-	cfg.AllowDisabledPagination = true
-	cfg.AllowWithDeletedInQuery = true
-	cfg.Format = FormatNestJS
-	return *cfg
+}
+
+func fuzzEndpoints() (offset, cursor *Endpoint) {
+	cfg := fuzzConfig()
+	offset = MustCompile(cfg)
+	cfg.Pagination = CursorPagination
+	cfg.NullSort = NullsLast
+	return offset, MustCompile(cfg)
 }
 
 // checkSQL fails when a condition could carry client input in its text.
@@ -54,8 +54,9 @@ func checkSQL(t *testing.T, sql string, args []any) {
 
 func checkError(t *testing.T, err error) {
 	t.Helper()
-	if !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("client input must fail with ErrInvalidRequest, got %v", err)
+	var pe *Error
+	if !errors.Is(err, ErrInvalidRequest) || !errors.As(err, &pe) || pe.Code == "" {
+		t.Fatalf("client input must fail with a coded ErrInvalidRequest, got %v", err)
 	}
 }
 
@@ -77,10 +78,7 @@ func FuzzParseFilterExpression(f *testing.F) {
 	} {
 		f.Add(seed)
 	}
-	cfg := fuzzConfig()
-	if err := normalizeConfig(&cfg); err != nil {
-		f.Fatal(err)
-	}
+	e, _ := fuzzEndpoints()
 	f.Fuzz(func(t *testing.T, input string) {
 		node, err := parseFilterExpression(input, 50)
 		if err != nil {
@@ -90,7 +88,7 @@ func FuzzParseFilterExpression(f *testing.F) {
 		if nodes := countNodes(node); nodes > 50 {
 			t.Fatalf("%d nodes over the cap of 50", nodes)
 		}
-		expr, err := node.render(&cfg)
+		expr, err := node.render(e)
 		if err != nil {
 			checkError(t, err)
 			return
@@ -130,18 +128,24 @@ func FuzzParseSortBy(f *testing.F) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, value string) {
-		sortBy, keys, err := parseSortBy([]string{value, value})
+		sortBy, err := parseSortBy([]string{value, value})
 		if err != nil {
 			checkError(t, err)
 			return
 		}
-		if len(keys) != 1 || len(sortBy) != 1 {
-			t.Fatalf("a repeated key must stay one key: %v %v", keys, sortBy)
+		if len(sortBy) != 1 {
+			t.Fatalf("a repeated field must stay one key: %v", sortBy)
 		}
-		if order := sortBy[keys[0]]; order != Asc && order != Desc {
+		if order := sortBy[0].Order; order != Asc && order != Desc {
 			t.Fatalf("order %q", order)
 		}
 	})
+}
+
+// fuzzRows are rows with every field of fuzzConfig, so cursors can be made from them.
+var fuzzRows = []map[string]any{
+	{"id": 1, "name": "a", "price": 2.5, "createdAt": "2024-01-01T00:00:00Z"},
+	{"id": 2, "name": nil, "price": 3, "createdAt": "2024-01-02T00:00:00Z"},
 }
 
 func FuzzParseQuery(f *testing.F) {
@@ -154,43 +158,73 @@ func FuzzParseQuery(f *testing.F) {
 		"sortBy=id&filter.id=$in:" + strings.Repeat("1,", 50),
 		"filter.unknown=1&sortBy=secret:asc",
 		"search=%25_%5C&filter.name=$ilike:50%25",
+		"limit=1&sortBy=price:desc&cursor=WyJuIiwicHJpY2U6REVTQyxpZDpBU0MiLDIuNSwxXQ",
+		"cursor=%%%",
 	} {
 		f.Add(seed)
 	}
-	cfg := fuzzConfig()
+	offset, cursor := fuzzEndpoints()
 	f.Fuzz(func(t *testing.T, query string) {
 		values, err := url.ParseQuery(query)
 		if err != nil {
 			return
 		}
-		req, err := ParseQuery(values, "/items")
-		if err != nil {
-			checkError(t, err)
-			return
+		for _, e := range []*Endpoint{offset, cursor} {
+			req, err := ParseQuery(values, "/items")
+			if err != nil {
+				checkError(t, err)
+				return
+			}
+			q, err := e.Prepare(req)
+			if err != nil {
+				checkError(t, err)
+				continue
+			}
+			for _, condition := range q.Where {
+				checkSQL(t, condition.SQL, condition.Args)
+			}
+			for _, order := range q.OrderBy(true) {
+				checkSQL(t, order, nil)
+			}
+			if q.Limit == 0 || q.Limit > DefaultMaxLimit {
+				t.Fatalf("limit %d out of range", q.Limit)
+			}
+			page, err := NewResponse(q, append([]map[string]any(nil), fuzzRows...), Total{Items: 42})
+			if err != nil {
+				t.Fatalf("answer: %v", err)
+			}
+			encoded, err := json.Marshal(page)
+			if err != nil || !json.Valid(encoded) {
+				t.Fatalf("answer JSON %s: %v", encoded, err)
+			}
+			if links := page.Meta.Links(); !strings.HasPrefix(links.Current, "/items?") {
+				t.Fatalf("link %q", links.Current)
+			}
 		}
-		q, err := Prepare(req, cfg)
+	})
+}
+
+func FuzzCursor(f *testing.F) {
+	_, e := fuzzEndpoints()
+	q, err := e.Prepare(&Request{SortBy: []Sort{{"price", Desc}}, Path: "/items"})
+	if err != nil {
+		f.Fatal(err)
+	}
+	page, err := NewResponse(q, append([]map[string]any(nil), fuzzRows...), Total{})
+	if err != nil {
+		f.Fatal(err)
+	}
+	for _, seed := range []string{page.Meta.NextCursor, "", "e30", "WyJuIl0", "WyJ4IiwicHJpY2U6REVTQyxpZDpBU0MiLDEsMl0", "WyJwIiwicHJpY2U6REVTQyxpZDpBU0MiLG51bGwsIngiXQ"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, cursor string) {
+		q, err := e.Prepare(&Request{SortBy: []Sort{{"price", Desc}}, Cursor: cursor})
 		if err != nil {
 			checkError(t, err)
 			return
 		}
 		for _, condition := range q.Where {
 			checkSQL(t, condition.SQL, condition.Args)
-		}
-		for _, order := range q.OrderBy(true) {
-			checkSQL(t, order, nil)
-		}
-		if q.Limit == 0 || q.Limit > DefaultMaxLimit {
-			t.Fatalf("limit %d out of range", q.Limit)
-		}
-		encoded, err := json.Marshal(NewResponse([]int{1}, *req, 42))
-		if err != nil {
-			t.Fatalf("answer: %v", err)
-		}
-		if !json.Valid(encoded) {
-			t.Fatalf("invalid JSON %s", encoded)
-		}
-		if links := NewResponse([]int{1}, *req, 42).Meta.Links(); !strings.HasPrefix(links.Current, "/items?page=") {
-			t.Fatalf("link %q", links.Current)
 		}
 	})
 }

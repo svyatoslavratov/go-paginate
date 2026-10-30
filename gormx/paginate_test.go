@@ -63,7 +63,7 @@ func TestPaginateGormSQL(t *testing.T) {
 			name:      "default page",
 			query:     func(db *gorm.DB) *gorm.DB { return db.Model(&gormItem{}) },
 			wantCount: `SELECT count(*) FROM "items" WHERE "items"."deleted_at" IS NULL`,
-			wantFind:  `SELECT * FROM "items" WHERE "items"."deleted_at" IS NULL ORDER BY items.created_at desc,items.id asc LIMIT $1`,
+			wantFind:  `SELECT * FROM "items" WHERE "items"."deleted_at" IS NULL ORDER BY items.created_at DESC,items.id ASC LIMIT $1`,
 		},
 		{
 			name:  "search and filters",
@@ -75,7 +75,7 @@ func TestPaginateGormSQL(t *testing.T) {
 				Filter: paginate.FilterQuery{"id": {"$in:1,2"}, "name": {"x", "$or:$null"}},
 			},
 			wantCount: `SELECT count(*) FROM "items" WHERE items.shop_id = $1 AND CAST(items.name AS TEXT) ILIKE $2 AND (((items.id IN ($3, $4)) AND ((items.name = $5) OR (items.name IS NULL)))) AND "items"."deleted_at" IS NULL`,
-			wantFind:  `SELECT * FROM "items" WHERE items.shop_id = $1 AND CAST(items.name AS TEXT) ILIKE $2 AND (((items.id IN ($3, $4)) AND ((items.name = $5) OR (items.name IS NULL)))) AND "items"."deleted_at" IS NULL ORDER BY items.created_at desc,items.id asc LIMIT $6 OFFSET $7`,
+			wantFind:  `SELECT * FROM "items" WHERE items.shop_id = $1 AND CAST(items.name AS TEXT) ILIKE $2 AND (((items.id IN ($3, $4)) AND ((items.name = $5) OR (items.name IS NULL)))) AND "items"."deleted_at" IS NULL ORDER BY items.created_at DESC,items.id ASC LIMIT $6 OFFSET $7`,
 			wantVars:  []any{7, `%a\_b%`, "1", "2", "x"},
 		},
 		{
@@ -83,7 +83,7 @@ func TestPaginateGormSQL(t *testing.T) {
 			query:     func(db *gorm.DB) *gorm.DB { return db.Model(&gormItem{}) },
 			req:       paginate.Request{Filter: paginate.FilterQuery{"tags": {"$contains:red,big"}}},
 			wantCount: `SELECT count(*) FROM "items" WHERE items.tags @> $1 AND "items"."deleted_at" IS NULL`,
-			wantFind:  `SELECT * FROM "items" WHERE items.tags @> $1 AND "items"."deleted_at" IS NULL ORDER BY items.created_at desc,items.id asc LIMIT $2`,
+			wantFind:  `SELECT * FROM "items" WHERE items.tags @> $1 AND "items"."deleted_at" IS NULL ORDER BY items.created_at DESC,items.id ASC LIMIT $2`,
 			wantVars:  []any{`{"red","big"}`},
 		},
 		{
@@ -92,29 +92,45 @@ func TestPaginateGormSQL(t *testing.T) {
 			req:       paginate.Request{WithDeleted: true},
 			config:    func(cfg *paginate.Config) { cfg.AllowWithDeletedInQuery = true },
 			wantCount: `SELECT count(*) FROM "items"`,
-			wantFind:  `SELECT * FROM "items" ORDER BY items.created_at desc,items.id asc LIMIT $1`,
+			wantFind:  `SELECT * FROM "items" ORDER BY items.created_at DESC,items.id ASC LIMIT $1`,
 		},
 		{
 			name:      "withDeleted is ignored by default",
 			query:     func(db *gorm.DB) *gorm.DB { return db.Model(&gormItem{}) },
 			req:       paginate.Request{WithDeleted: true},
 			wantCount: `SELECT count(*) FROM "items" WHERE "items"."deleted_at" IS NULL`,
-			wantFind:  `SELECT * FROM "items" WHERE "items"."deleted_at" IS NULL ORDER BY items.created_at desc,items.id asc LIMIT $1`,
+			wantFind:  `SELECT * FROM "items" WHERE "items"."deleted_at" IS NULL ORDER BY items.created_at DESC,items.id ASC LIMIT $1`,
 		},
 		{
-			name:      "every row: no LIMIT",
-			query:     func(db *gorm.DB) *gorm.DB { return db.Model(&gormItem{}) },
-			req:       paginate.Request{Mode: paginate.ModeDisabled},
-			wantCount: `SELECT count(*) FROM "items" WHERE "items"."deleted_at" IS NULL`,
-			wantFind:  `SELECT * FROM "items" WHERE "items"."deleted_at" IS NULL ORDER BY items.created_at desc,items.id asc`,
+			name:     "every row: no LIMIT, no count",
+			query:    func(db *gorm.DB) *gorm.DB { return db.Model(&gormItem{}) },
+			req:      paginate.Request{Mode: paginate.ModeDisabled},
+			wantFind: `SELECT * FROM "items" WHERE "items"."deleted_at" IS NULL ORDER BY items.created_at DESC,items.id ASC`,
 		},
 		{
-			name: "raw DISTINCT gets no tie-breaker",
+			name:     "no count: a row more than the page",
+			query:    func(db *gorm.DB) *gorm.DB { return db.Model(&gormItem{}) },
+			req:      paginate.Request{Limit: 5},
+			config:   func(cfg *paginate.Config) { cfg.Count = paginate.CountNone },
+			wantFind: `SELECT * FROM "items" WHERE "items"."deleted_at" IS NULL ORDER BY items.created_at DESC,items.id ASC LIMIT $1`,
+			wantVars: []any{6},
+		},
+		{
+			name:   "cursor pagination: the keyset instead of OFFSET",
+			query:  func(db *gorm.DB) *gorm.DB { return db.Model(&gormItem{}) },
+			req:    paginate.Request{Limit: 5, Cursor: itemsCursor()},
+			config: func(cfg *paginate.Config) { cfg.Pagination = paginate.CursorPagination },
+			// GORM parenthesizes a condition with OR once more.
+			wantFind: `SELECT * FROM "items" WHERE (((items.created_at <= $1) AND ((items.created_at < $2) OR ((items.created_at = $3) AND (items.id > $4))))) AND "items"."deleted_at" IS NULL ORDER BY items.created_at DESC,items.id ASC LIMIT $5`,
+			wantVars: []any{"2024-05-01T10:00:00Z", "2024-05-01T10:00:00Z", "2024-05-01T10:00:00Z", "7", 6},
+		},
+		{
+			name: "raw DISTINCT: no tie-breaker, counted through a subquery",
 			query: func(db *gorm.DB) *gorm.DB {
 				return db.Model(&gormItem{}).Select("DISTINCT items.name, items.created_at")
 			},
-			wantCount: `SELECT count(*) FROM "items" WHERE "items"."deleted_at" IS NULL`,
-			wantFind:  `SELECT DISTINCT items.name, items.created_at FROM "items" WHERE "items"."deleted_at" IS NULL ORDER BY items.created_at desc LIMIT $1`,
+			wantCount: `SELECT count(*) FROM (SELECT DISTINCT items.name, items.created_at FROM "items" WHERE "items"."deleted_at" IS NULL) AS paginate_count`,
+			wantFind:  `SELECT DISTINCT items.name, items.created_at FROM "items" WHERE "items"."deleted_at" IS NULL ORDER BY items.created_at DESC LIMIT $1`,
 		},
 	}
 	for _, tc := range tests {
@@ -125,21 +141,22 @@ func TestPaginateGormSQL(t *testing.T) {
 			if tc.config != nil {
 				tc.config(&cfg)
 			}
-			if _, err := Paginate[gormItem](context.Background(), tc.req, cfg, tc.query(db)); err != nil {
+			if _, err := Paginate[gormItem](context.Background(), tc.req, paginate.MustCompile(cfg), tc.query(db)); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if len(*captured) != 2 {
-				t.Fatalf("want count and find, got %+v", *captured)
+			// A count over a subquery renders the subquery first; the count and the page come last.
+			statements := *captured
+			if tc.wantCount != "" {
+				if len(statements) < 2 || statements[len(statements)-2].sql != tc.wantCount {
+					t.Fatalf("count:\nwant %s\ngot  %+v", tc.wantCount, statements)
+				}
+				statements = statements[len(statements)-1:]
 			}
-			count, find := (*captured)[0], (*captured)[1]
-			if count.sql != tc.wantCount {
-				t.Errorf("count:\nwant %s\ngot  %s", tc.wantCount, count.sql)
+			if len(statements) != 1 || statements[0].sql != tc.wantFind {
+				t.Fatalf("find:\nwant %s\ngot  %+v", tc.wantFind, statements)
 			}
-			if find.sql != tc.wantFind {
-				t.Errorf("find:\nwant %s\ngot  %s", tc.wantFind, find.sql)
-			}
-			if len(tc.wantVars) != 0 && !reflect.DeepEqual(count.vars, tc.wantVars) {
-				t.Errorf("vars: want %#v, got %#v", tc.wantVars, count.vars)
+			if len(tc.wantVars) != 0 && !reflect.DeepEqual(statements[0].vars[:len(tc.wantVars)], tc.wantVars) {
+				t.Errorf("vars: want %#v, got %#v", tc.wantVars, statements[0].vars)
 			}
 		})
 	}
@@ -148,7 +165,7 @@ func TestPaginateGormSQL(t *testing.T) {
 func TestPaginateGormCountOnly(t *testing.T) {
 	t.Parallel()
 	db, captured := dryRunDB(t)
-	res, err := Paginate[gormItem](context.Background(), paginate.Request{RequestedMode: paginate.ModeCount}, itemsConfig(), db.Model(&gormItem{}))
+	res, err := Paginate[gormItem](context.Background(), paginate.Request{RequestedMode: paginate.ModeCount}, paginate.MustCompile(itemsConfig()), db.Model(&gormItem{}))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -160,12 +177,22 @@ func TestPaginateGormCountOnly(t *testing.T) {
 func TestPaginateGormErrors(t *testing.T) {
 	t.Parallel()
 	db, captured := dryRunDB(t)
-	if _, err := Paginate[gormItem](context.Background(), paginate.Request{}, itemsConfig(), nil); err == nil {
+	endpoint := paginate.MustCompile(itemsConfig())
+	if _, err := Paginate[gormItem](context.Background(), paginate.Request{}, endpoint, nil); err == nil {
 		t.Fatal("want an error without a query")
 	}
+	if _, err := Paginate[gormItem](context.Background(), paginate.Request{}, nil, db.Model(&gormItem{})); err == nil {
+		t.Fatal("want an error without an endpoint")
+	}
 	req := paginate.Request{Filter: paginate.FilterQuery{"price": {"$ilike:1"}}}
-	if _, err := Paginate[gormItem](context.Background(), req, itemsConfig(), db.Model(&gormItem{})); !errors.Is(err, paginate.ErrInvalidRequest) {
+	if _, err := Paginate[gormItem](context.Background(), req, endpoint, db.Model(&gormItem{})); !errors.Is(err, paginate.ErrInvalidRequest) {
 		t.Fatalf("want validation error, got %v", err)
+	}
+	cfg := itemsConfig()
+	cfg.Pagination = paginate.CursorPagination
+	distinct := db.Model(&gormItem{}).Distinct("items.name")
+	if _, err := Paginate[gormItem](context.Background(), paginate.Request{}, paginate.MustCompile(cfg), distinct); err == nil {
+		t.Fatal("cursor pagination of a DISTINCT query without the tie-breaker must fail")
 	}
 	if len(*captured) != 0 {
 		t.Fatalf("invalid requests must not reach the database: %+v", *captured)
@@ -173,21 +200,31 @@ func TestPaginateGormErrors(t *testing.T) {
 }
 
 func itemsConfig() paginate.Config {
-	cfg := paginate.NewConfig("items", []string{"items.created_at", "items.name"}, map[string]string{
-		"id":        "items.id",
-		"name":      "items.name",
-		"createdAt": "items.created_at",
-		"tags":      "items.tags",
-		"price":     "items.price",
-	})
-	cfg.SearchableColumns = []string{"items.name"}
-	cfg.FilterableColumns = paginate.FilterableColumns{
-		"items.id":    {paginate.OpIn},
-		"items.name":  paginate.AllOperators,
-		"items.tags":  {paginate.OpContains},
-		"items.price": {paginate.OpBtw, paginate.OpGte},
+	return paginate.Config{
+		Fields: []paginate.Field{
+			{Name: "id", Column: "items.id", Type: paginate.Int, Filter: []paginate.Operator{paginate.OpIn}},
+			{Name: "name", Column: "items.name", Sortable: true, Searchable: true, Filter: paginate.AllOperators},
+			{Name: "createdAt", Column: "items.created_at", Type: paginate.Time, Sortable: true},
+			{Name: "tags", Column: "items.tags", Filter: []paginate.Operator{paginate.OpContains}},
+			{Name: "price", Column: "items.price", Filter: []paginate.Operator{paginate.OpBtw, paginate.OpGte}},
+		},
+		DefaultSort: []paginate.Sort{{Field: "createdAt", Order: paginate.Desc}},
+		TieBreak:    "items.id",
 	}
-	cfg.DefaultSortBy = paginate.SortBy{"items.created_at": paginate.Desc}
-	cfg.TieBreakColumn = "items.id"
-	return *cfg
+}
+
+// itemsCursor is a cursor of itemsConfig in cursor pagination: after the row created at
+// 2024-05-01T10:00:00Z with id 7.
+func itemsCursor() string {
+	cfg := itemsConfig()
+	cfg.Pagination = paginate.CursorPagination
+	q, err := paginate.MustCompile(cfg).Prepare(&paginate.Request{Limit: 1})
+	if err != nil {
+		panic(err)
+	}
+	page, err := paginate.NewResponse(q, []map[string]any{{"id": 7, "createdAt": "2024-05-01T10:00:00Z"}, {"id": 8, "createdAt": "2024-04-30T10:00:00Z"}}, paginate.Total{})
+	if err != nil {
+		panic(err)
+	}
+	return page.Meta.NextCursor
 }

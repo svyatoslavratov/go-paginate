@@ -1,8 +1,9 @@
 //go:build js && wasm
 
-// Command wasm is the go-paginate demo for the browser: the same library and config as the server,
-// compiled to WebAssembly. It renders SQL for PGlite (Postgres in WebAssembly) and builds the
-// answers; the page runs the SQL. The page reaches it through the global goPaginate object.
+// Command wasm is the go-paginate demo for the browser: the same library and endpoints as the
+// server, compiled to WebAssembly. It renders the SQL for PGlite (Postgres in WebAssembly) and
+// builds the answers; the page runs the SQL. The page reaches it through the global goPaginate
+// object.
 package main
 
 import (
@@ -25,6 +26,7 @@ func main() {
 	api.Set("schema", js.FuncOf(func(js.Value, []js.Value) any { return encode(catalog.Fields()) }))
 	api.Set("seed", js.FuncOf(func(js.Value, []js.Value) any { return catalog.SeedSQL }))
 	api.Set("prepare", js.FuncOf(prepare))
+	api.Set("estimate", js.FuncOf(estimate))
 	api.Set("respond", js.FuncOf(respond))
 	js.Global().Set("goPaginate", api)
 	js.Global().Call("dispatchEvent", js.Global().Get("Event").New("go-paginate-ready"))
@@ -37,9 +39,10 @@ type statement struct {
 	Text string `json:"text"`
 }
 
-// prepare(query) renders the count and the page of a query string, as the server would run them.
+// prepare(query) renders what the server runs for a query string: the estimate, the count and the
+// page, each only when the request needs it.
 func prepare(_ js.Value, args []js.Value) any {
-	req, q, err := parse(args[0].String())
+	q, err := parse(args[0].String())
 	if err != nil {
 		return encodeError(err)
 	}
@@ -47,28 +50,42 @@ func prepare(_ js.Value, args []js.Value) any {
 	for _, condition := range q.Where {
 		qb = qb.Where(squirrel.Expr(condition.SQL, condition.Args...))
 	}
-	count, err := render(squirrel.Select("COUNT(*)::int AS total").FromSelect(qb, "filtered"))
-	if err != nil {
-		return encodeError(err)
+	answer := map[string]any{"exactCountBelow": q.ExactCountBelow}
+	if q.Count != paginate.CountNone {
+		if answer["count"], err = render(squirrel.Select("COUNT(*)::int AS total").FromSelect(qb, "filtered"), ""); err != nil {
+			return encodeError(err)
+		}
 	}
-	answer := map[string]any{"count": count, "mode": req.Mode}
+	if q.Count == paginate.CountEstimate {
+		if answer["estimate"], err = render(qb, paginate.ExplainPrefix); err != nil {
+			return encodeError(err)
+		}
+	}
 	if q.Mode != paginate.ModeCount {
 		page := qb.OrderBy(q.OrderBy(true)...)
 		if q.Mode == paginate.ModeDefault {
-			page = page.Limit(q.Limit).Offset(q.Offset)
+			page = page.Limit(q.FetchLimit()).Offset(q.Offset)
 		}
-		selected, err := render(page)
-		if err != nil {
+		if answer["page"], err = render(page, ""); err != nil {
 			return encodeError(err)
 		}
-		answer["select"] = selected
 	}
 	return encode(answer)
 }
 
-// respond(query, rows, total) builds the answer for rows the page fetched.
+// estimate(plan) reads the row estimate from the output of EXPLAIN (FORMAT JSON); -1 if it cannot.
+func estimate(_ js.Value, args []js.Value) any {
+	n, err := paginate.EstimateFromPlan([]byte(args[0].String()))
+	if err != nil {
+		return -1
+	}
+	return float64(n)
+}
+
+// respond(query, rows, total, count) builds the answer for the rows the page read; count is how
+// it counted the total: exact, estimate or none.
 func respond(_ js.Value, args []js.Value) any {
-	req, _, err := parse(args[0].String())
+	q, err := parse(args[0].String())
 	if err != nil {
 		return encodeError(err)
 	}
@@ -76,26 +93,33 @@ func respond(_ js.Value, args []js.Value) any {
 	if err := json.Unmarshal([]byte(args[1].String()), &rows); err != nil {
 		return encodeError(err)
 	}
-	return encode(paginate.NewResponse(rows, *req, uint64(args[2].Int())))
+	total := paginate.Total{Items: uint64(args[2].Int()), Count: paginate.CountExact}
+	if args[3].String() == "estimate" {
+		total.Count = paginate.CountEstimate
+	}
+	page, err := paginate.NewResponse(q, rows, total)
+	if err != nil {
+		return encodeError(err)
+	}
+	return encode(page)
 }
 
-func parse(query string) (*paginate.Request, *paginate.Query, error) {
+// parse reads a query string the way the server does and prepares it on the endpoint the demo's
+// own parameters pick.
+func parse(query string) (*paginate.Query, error) {
 	values, err := url.ParseQuery(query)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	req, err := paginate.ParseQuery(values, catalog.Path)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	q, err := paginate.Prepare(req, catalog.ConfigFor(values.Get("format")))
-	if err != nil {
-		return nil, nil, err
-	}
-	return req, q, nil
+	return catalog.Endpoint(catalog.OptionsOf(values)).Prepare(req)
 }
 
-func render(qb squirrel.SelectBuilder) (statement, error) {
+// render renders a statement for PGlite, and a text for the page with the values listed after it.
+func render(qb squirrel.SelectBuilder, prefix string) (statement, error) {
 	sql, args, err := qb.PlaceholderFormat(squirrel.Dollar).ToSql()
 	if err != nil {
 		return statement{}, err
@@ -103,7 +127,7 @@ func render(qb squirrel.SelectBuilder) (statement, error) {
 	if args == nil {
 		args = []any{} // PGlite takes an array of parameters, not null
 	}
-	text := sql
+	text := prefix + sql
 	if len(args) != 0 {
 		values := make([]string, len(args))
 		for i, arg := range args {
@@ -111,7 +135,7 @@ func render(qb squirrel.SelectBuilder) (statement, error) {
 		}
 		text += "\n-- " + strings.Join(values, ", ")
 	}
-	return statement{SQL: sql, Args: args, Text: text}, nil
+	return statement{SQL: prefix + sql, Args: args, Text: text}, nil
 }
 
 func encode(v any) string {
@@ -122,11 +146,17 @@ func encode(v any) string {
 	return string(encoded)
 }
 
+// encodeError answers like the server: a client's mistake with its code, field and message.
 func encodeError(err error) string {
-	status := http.StatusInternalServerError
-	if errors.Is(err, paginate.ErrInvalidRequest) {
-		status = http.StatusBadRequest
+	status := paginate.HTTPStatus(err)
+	var body any = map[string]string{"code": "internal", "message": err.Error()}
+	var pe *paginate.Error
+	if errors.As(err, &pe) {
+		body = pe
 	}
-	encoded, _ := json.Marshal(map[string]any{"error": err.Error(), "status": status})
+	if status != http.StatusBadRequest {
+		status = http.StatusInternalServerError
+	}
+	encoded, _ := json.Marshal(map[string]any{"error": body, "status": status})
 	return string(encoded)
 }

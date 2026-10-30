@@ -20,17 +20,16 @@ type Account struct {
 	Balance int64  `db:"balance"`
 }
 
-func accountsConfig() paginate.Config {
-	cfg := paginate.NewConfig("a", []string{"a.created_at", "a.balance"}, map[string]string{
-		"number":  "a.number",
-		"balance": "a.balance",
-		"owner":   "o.name",
-	})
-	cfg.SearchableColumns = []string{"a.number", "o.name"}
-	cfg.FilterableColumns = paginate.FilterableColumns{"a.balance": {paginate.OpGte}}
-	cfg.TieBreakColumn = "a.id"
-	return *cfg
-}
+// accounts is the endpoint of the examples; o.name comes from a joined table.
+var accounts = paginate.MustCompile(paginate.Config{
+	Fields: []paginate.Field{
+		{Name: "number", Column: "a.number", Searchable: true},
+		{Name: "balance", Column: "a.balance", Type: paginate.Int, Sortable: true, Filter: []paginate.Operator{paginate.OpGte}},
+		{Name: "createdAt", Column: "a.created_at", Type: paginate.Time, Sortable: true},
+		{Name: "owner", Column: "o.name", Searchable: true},
+	},
+	TieBreak: "a.id",
+})
 
 // Paginate runs the count and the page on a pgx pool.
 func ExamplePaginate() {
@@ -45,7 +44,7 @@ func ExamplePaginate() {
 		return pgx.CollectRows(rows, pgx.RowToStructByName[Account])
 	}
 	if pool != nil {
-		page, err := squirrelx.Paginate(context.Background(), *req, accountsConfig(), pool, scan, qb)
+		page, err := squirrelx.Paginate(context.Background(), *req, accounts, pool, scan, qb)
 		_, _ = page, err
 	}
 }
@@ -58,15 +57,15 @@ func ExampleStatements() {
 		Join("owners AS o ON o.id = a.owner_id").
 		Where(squirrel.Eq{"a.owner_id": 7})
 
-	count, page, err := squirrelx.Statements(qb, req, accountsConfig())
+	plan, err := squirrelx.Statements(qb, req, accounts)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(count.SQL)
-	fmt.Println(page.SQL)
-	fmt.Println(page.Args...)
+	fmt.Println(plan.Count.SQL)
+	fmt.Println(plan.Page.SQL)
+	fmt.Println(plan.Page.Args...)
 	// Output:
 	// SELECT COUNT(*) FROM (SELECT a.id, a.number, a.balance FROM accounts AS a JOIN owners AS o ON o.id = a.owner_id WHERE a.owner_id = $1 AND ((CAST(a.number AS TEXT) ILIKE $2) OR (CAST(o.name AS TEXT) ILIKE $3)) AND a.balance >= $4) AS paginate_count
-	// SELECT a.id, a.number, a.balance FROM accounts AS a JOIN owners AS o ON o.id = a.owner_id WHERE a.owner_id = $1 AND ((CAST(a.number AS TEXT) ILIKE $2) OR (CAST(o.name AS TEXT) ILIKE $3)) AND a.balance >= $4 ORDER BY a.balance desc, a.id asc LIMIT 10 OFFSET 10
+	// SELECT a.id, a.number, a.balance FROM accounts AS a JOIN owners AS o ON o.id = a.owner_id WHERE a.owner_id = $1 AND ((CAST(a.number AS TEXT) ILIKE $2) OR (CAST(o.name AS TEXT) ILIKE $3)) AND a.balance >= $4 ORDER BY a.balance DESC, a.id ASC LIMIT 10 OFFSET 10
 	// 7 %ann% %ann% 100
 }

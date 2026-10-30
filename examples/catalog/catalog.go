@@ -1,11 +1,12 @@
-// Package catalog is the go-paginate demo: a products table, the config of its list endpoint, and
-// a description of the fields for the demo page. The server (cmd/server) and the browser build
+// Package catalog is the go-paginate demo: a products table, the endpoints of its list, and a
+// description of the fields for the demo page. The server (cmd/server) and the browser build
 // (cmd/wasm) share it, so both answer the same way.
 package catalog
 
 import (
 	_ "embed"
-	"slices"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -21,19 +22,20 @@ var SeedSQL string
 // Path is the path of the list endpoint; links in the answers start with it.
 const Path = "/api/products"
 
-// Product is a row of the products table; its JSON names are the API fields.
+// Product is a row of the products table. Its paginate tags are the API of the list: what clients
+// may sort, search and filter by, and with which operators.
 type Product struct {
-	ID             int        `json:"id" gorm:"primaryKey"`
-	SKU            string     `json:"sku" gorm:"column:sku"`
-	Name           string     `json:"name"`
-	Brand          string     `json:"brand"`
-	Category       string     `json:"category"`
-	Price          float64    `json:"price"`
-	Rating         *float64   `json:"rating"`
-	Stock          int        `json:"stock"`
-	Tags           Tags       `json:"tags" gorm:"type:text[]"`
-	ReleasedAt     time.Time  `json:"releasedAt"`
-	DiscontinuedAt *time.Time `json:"discontinuedAt"`
+	ID             int        `json:"id" gorm:"primaryKey" paginate:"unique;sort;filter:$in,$gt,$gte,$lt,$lte,$btw"`
+	SKU            string     `json:"sku" gorm:"column:sku" paginate:"type:uuid;filter;notnull"`
+	Name           string     `json:"name" paginate:"sort;search;filter:$ilike,$sw,$in;notnull"`
+	Brand          string     `json:"brand" paginate:"sort;search;filter:$in,$sw,$ilike;notnull"`
+	Category       string     `json:"category" paginate:"sort;search;filter:$in;enum:lighting,seating,tables,storage,decor;notnull"`
+	Price          float64    `json:"price" paginate:"sort;filter:$gt,$gte,$lt,$lte,$btw;notnull"`
+	Rating         *float64   `json:"rating" paginate:"sort;filter:$gte,$lte,$btw,$null"`
+	Stock          int        `json:"stock" paginate:"sort;filter:$gt,$lt,$btw;notnull"`
+	Tags           Tags       `json:"tags" gorm:"type:text[]" paginate:"filter:$contains;enum:sale,new,eco,bestseller,limited"`
+	ReleasedAt     time.Time  `json:"releasedAt" paginate:"sort;filter:$gte,$lt,$btw;notnull"`
+	DiscontinuedAt *time.Time `json:"discontinuedAt" paginate:"filter:$null"`
 }
 
 // TableName names the table for GORM.
@@ -68,58 +70,67 @@ var BrowserColumns = []string{
 	`products.discontinued_at AS "discontinuedAt"`,
 }
 
-// Config is the config of the list endpoint: every operator where it makes sense, the
-// nestjs-paginate answer, and every row on request (the table is small).
+// Config is the config of the list: the fields from the tags of Product, NULL values last, every
+// row on request (the table is small), the nestjs-paginate answer. Estimates of fewer than 100 rows
+// are counted exactly.
 func Config() paginate.Config {
-	cfg := paginate.NewConfig("products",
-		[]string{
-			"products.released_at", "products.id", "products.name", "products.brand", "products.category",
-			"products.price", "products.rating", "products.stock",
-		},
-		map[string]string{
-			"id":             "products.id",
-			"sku":            "products.sku",
-			"name":           "products.name",
-			"brand":          "products.brand",
-			"category":       "products.category",
-			"price":          "products.price",
-			"rating":         "products.rating",
-			"stock":          "products.stock",
-			"tags":           "products.tags",
-			"releasedAt":     "products.released_at",
-			"discontinuedAt": "products.discontinued_at",
-		})
-	cfg.SearchableColumns = []string{"products.name", "products.brand", "products.category"}
-	cfg.FilterableColumns = paginate.FilterableColumns{
-		"products.id":              {paginate.OpIn, paginate.OpGt, paginate.OpGte, paginate.OpLt, paginate.OpLte, paginate.OpBtw},
-		"products.sku":             {},
-		"products.name":            {paginate.OpILike, paginate.OpSw, paginate.OpIn},
-		"products.brand":           {paginate.OpIn, paginate.OpSw, paginate.OpILike},
-		"products.category":        {paginate.OpIn},
-		"products.price":           {paginate.OpGt, paginate.OpGte, paginate.OpLt, paginate.OpLte, paginate.OpBtw},
-		"products.rating":          {paginate.OpGte, paginate.OpLte, paginate.OpBtw, paginate.OpNull},
-		"products.stock":           {paginate.OpGt, paginate.OpLt, paginate.OpBtw},
-		"products.tags":            {paginate.OpContains},
-		"products.released_at":     {paginate.OpGte, paginate.OpLt, paginate.OpBtw},
-		"products.discontinued_at": {paginate.OpNull},
+	cfg, err := paginate.ConfigOf[Product]("products")
+	if err != nil {
+		panic(err)
 	}
-	cfg.DefaultSortBy = paginate.SortBy{"products.released_at": paginate.Desc}
-	cfg.TieBreakColumn = "products.id"
+	cfg.DefaultSort = []paginate.Sort{{Field: "releasedAt", Order: paginate.Desc}}
 	cfg.NullSort = paginate.NullsLast
 	cfg.MultiWordSearch = true
 	cfg.AllowDisabledPagination = true
+	cfg.ExactCountBelow = 100
 	cfg.Format = paginate.FormatNestJS
-	return *cfg
+	return cfg
 }
 
-// ConfigFor returns the config with the answer format the demo page asked for: "default" for this
-// package's own shape, anything else for nestjs-paginate's.
-func ConfigFor(format string) paginate.Config {
-	cfg := Config()
-	if format == "default" {
-		cfg.Format = paginate.FormatDefault
+// Options pick the endpoint the demo page talks to, through its own query parameters:
+// format=default, pages=cursor, count=estimate or count=none.
+type Options struct {
+	Format     paginate.Format
+	Pagination paginate.Pagination
+	Count      paginate.Count
+}
+
+// OptionsOf reads the options of a query.
+func OptionsOf(query url.Values) Options {
+	options := Options{Format: paginate.FormatNestJS}
+	if query.Get("format") == "default" {
+		options.Format = paginate.FormatDefault
 	}
-	return cfg
+	if query.Get("pages") == "cursor" {
+		options.Pagination = paginate.CursorPagination
+	}
+	switch query.Get("count") {
+	case "estimate":
+		options.Count = paginate.CountEstimate
+	case "none":
+		options.Count = paginate.CountNone
+	}
+	return options
+}
+
+// endpoints are compiled once, one per combination of options.
+var endpoints = func() map[Options]*paginate.Endpoint {
+	compiled := make(map[Options]*paginate.Endpoint)
+	for _, format := range []paginate.Format{paginate.FormatNestJS, paginate.FormatDefault} {
+		for _, pagination := range []paginate.Pagination{paginate.OffsetPagination, paginate.CursorPagination} {
+			for _, count := range []paginate.Count{paginate.CountExact, paginate.CountEstimate, paginate.CountNone} {
+				cfg := Config()
+				cfg.Format, cfg.Pagination, cfg.Count = format, pagination, count
+				compiled[Options{format, pagination, count}] = paginate.MustCompile(cfg)
+			}
+		}
+	}
+	return compiled
+}()
+
+// Endpoint returns the endpoint for the options.
+func Endpoint(options Options) *paginate.Endpoint {
+	return endpoints[options]
 }
 
 // Field describes an API field for the demo page.
@@ -131,36 +142,59 @@ type Field struct {
 	Searchable bool                `json:"searchable"`
 	Filterable bool                `json:"filterable"`
 	Operators  []paginate.Operator `json:"operators"`
+	Values     []string            `json:"values,omitempty"`
 	Example    string              `json:"example"`
 }
 
-var fields = []Field{
-	{Name: "id", Label: "ID", Type: "number", Example: "1,2,3"},
-	{Name: "sku", Label: "SKU", Type: "uuid", Example: "8402e99c-5b52-5201-6079-4615a8161683"},
-	{Name: "name", Label: "Name", Type: "text", Example: "lamp"},
-	{Name: "brand", Label: "Brand", Type: "text", Example: "Lumen"},
-	{Name: "category", Label: "Category", Type: "text", Example: "lighting,decor"},
-	{Name: "price", Label: "Price", Type: "number", Example: "10,100"},
-	{Name: "rating", Label: "Rating", Type: "number", Example: "4"},
-	{Name: "stock", Label: "Stock", Type: "number", Example: "10"},
-	{Name: "tags", Label: "Tags", Type: "tags", Example: "sale,new"},
-	{Name: "releasedAt", Label: "Released", Type: "date", Example: "2024-01-01"},
-	{Name: "discontinuedAt", Label: "Discontinued", Type: "date"},
+var labels = map[string][2]string{
+	"id":             {"ID", "1,2,3"},
+	"sku":            {"SKU", "8402e99c-5b52-5201-6079-4615a8161683"},
+	"name":           {"Name", "lamp"},
+	"brand":          {"Brand", "Lumen"},
+	"category":       {"Category", "lighting,decor"},
+	"price":          {"Price", "10,100"},
+	"rating":         {"Rating", "4"},
+	"stock":          {"Stock", "10"},
+	"tags":           {"Tags", "sale,new"},
+	"releasedAt":     {"Released", "2024-01-01"},
+	"discontinuedAt": {"Discontinued", ""},
 }
 
-// Fields describes the fields as Config allows them.
+// Fields describes the fields of the endpoint for the page: what the controls offer.
 func Fields() []Field {
-	cfg := Config()
+	fields := Endpoint(Options{Format: paginate.FormatNestJS}).Fields()
 	described := make([]Field, 0, len(fields))
 	for _, field := range fields {
-		column := cfg.FieldColumns[field.Name]
-		field.Sortable = slices.Contains(cfg.SortableColumns, column)
-		field.Searchable = slices.Contains(cfg.SearchableColumns, column)
-		if operators, ok := cfg.FilterableColumns[column]; ok {
-			field.Filterable = true
-			field.Operators = append([]paginate.Operator{paginate.OpEq}, operators...)
+		values := field.Type.Values()
+		if field.Type.IsArray() {
+			values = field.Type.Elem().Values()
 		}
-		described = append(described, field)
+		described = append(described, Field{
+			Name:       field.Name,
+			Label:      labels[field.Name][0],
+			Type:       pageType(field.Type),
+			Sortable:   field.Sortable,
+			Searchable: field.Searchable,
+			Filterable: field.Filter != nil,
+			Operators:  field.Filter,
+			Values:     values,
+			Example:    labels[field.Name][1],
+		})
 	}
 	return described
+}
+
+// pageType is how the page shows a field: number, uuid, date, tags or text.
+func pageType(t paginate.Type) string {
+	switch name := t.String(); {
+	case name == "int" || name == "number":
+		return "number"
+	case name == "uuid":
+		return "uuid"
+	case name == "time" || name == "date":
+		return "date"
+	case strings.HasPrefix(name, "array"):
+		return "tags"
+	}
+	return "text"
 }

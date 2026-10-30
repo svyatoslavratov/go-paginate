@@ -34,3 +34,6 @@ ON CONFLICT (id) DO NOTHING;
 
 CREATE INDEX IF NOT EXISTS products_category ON products (category);
 CREATE INDEX IF NOT EXISTS products_price ON products (price);
+
+-- Statistics for the planner, whose estimates count=estimate shows.
+ANALYZE products;

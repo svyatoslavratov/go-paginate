@@ -29,35 +29,26 @@ var Columns = []string{
 
 // Config is the config of the products endpoint.
 func Config() paginate.Config {
-	cfg := paginate.NewConfig("products",
-		[]string{"products.id", "products.name", "products.price", "products.rating", "products.released_at"},
-		map[string]string{
-			"id":             "products.id",
-			"name":           "products.name",
-			"brand":          "products.brand",
-			"category":       "products.category",
-			"price":          "products.price",
-			"rating":         "products.rating",
-			"stock":          "products.stock",
-			"tags":           "products.tags",
-			"releasedAt":     "products.released_at",
-			"discontinuedAt": "products.discontinued_at",
-		})
-	cfg.SearchableColumns = []string{"products.name", "products.brand"}
-	cfg.FilterableColumns = paginate.FilterableColumns{
-		"products.id":              {paginate.OpIn},
-		"products.name":            paginate.AllOperators,
-		"products.brand":           {paginate.OpIn, paginate.OpSw},
-		"products.category":        {paginate.OpIn},
-		"products.price":           {paginate.OpBtw, paginate.OpGte, paginate.OpLte},
-		"products.rating":          {paginate.OpGte, paginate.OpBtw},
-		"products.stock":           {paginate.OpGt, paginate.OpLt},
-		"products.tags":            {paginate.OpContains},
-		"products.released_at":     {paginate.OpBtw},
-		"products.discontinued_at": {paginate.OpNull},
+	return paginate.Config{
+		Fields: []paginate.Field{
+			{Name: "id", Column: "products.id", Type: paginate.Int, Sortable: true, Filter: []paginate.Operator{paginate.OpIn}},
+			{Name: "name", Column: "products.name", Type: paginate.Text, Sortable: true, Searchable: true, Filter: paginate.AllOperators},
+			{Name: "brand", Column: "products.brand", Type: paginate.Text, Searchable: true, Filter: []paginate.Operator{paginate.OpIn, paginate.OpSw}},
+			{Name: "category", Column: "products.category", Type: paginate.Text, Filter: []paginate.Operator{paginate.OpIn}},
+			{Name: "price", Column: "products.price", Type: paginate.Number, Sortable: true, Filter: []paginate.Operator{paginate.OpBtw, paginate.OpGte, paginate.OpLte}},
+			{Name: "rating", Column: "products.rating", Type: paginate.Number, Sortable: true, Filter: []paginate.Operator{paginate.OpGte, paginate.OpBtw}},
+			{Name: "stock", Column: "products.stock", Type: paginate.Int, Filter: []paginate.Operator{paginate.OpGt, paginate.OpLt}},
+			{Name: "tags", Column: "products.tags", Type: paginate.ArrayOf(paginate.Text), Filter: []paginate.Operator{paginate.OpContains}},
+			{Name: "releasedAt", Column: "products.released_at", Type: paginate.Time, Sortable: true, Filter: []paginate.Operator{paginate.OpBtw}},
+			{Name: "discontinuedAt", Column: "products.discontinued_at", Type: paginate.Time, Filter: []paginate.Operator{paginate.OpNull}},
+		},
+		TieBreak: "products.id",
 	}
-	cfg.TieBreakColumn = "products.id"
-	return *cfg
+}
+
+// Endpoint is the compiled products endpoint.
+func Endpoint() *paginate.Endpoint {
+	return paginate.MustCompile(Config())
 }
 
 // ProductsSQL creates the products table with the given number of generated rows, the same on every

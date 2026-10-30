@@ -13,27 +13,27 @@ func TestFilterExpr(t *testing.T) {
 	}
 	tests := []struct {
 		name          string
-		filters       []columnFilter
+		filters       []fieldFilter
 		compareAsText bool
 		wantSQL       string
 		wantArgs      []any
 	}{
 		{
 			name:     "one condition",
-			filters:  []columnFilter{{column: "t.name", conditions: []filterCondition{eq(and, "Milo")}}},
+			filters:  []fieldFilter{{field: col("t.name"), conditions: []filterCondition{eq(and, "Milo")}}},
 			wantSQL:  "t.name = ?",
 			wantArgs: []any{"Milo"},
 		},
 		{
 			name:          "compare as text",
-			filters:       []columnFilter{{column: "t.id", conditions: []filterCondition{eq(and, "5")}}},
+			filters:       []fieldFilter{{field: col("t.id"), conditions: []filterCondition{eq(and, "5")}}},
 			compareAsText: true,
 			wantSQL:       "CAST(t.id AS TEXT) = ?",
 			wantArgs:      []any{"5"},
 		},
 		{
 			name: "chain of one column: AND binds tighter than OR",
-			filters: []columnFilter{{column: "t.id", conditions: []filterCondition{
+			filters: []fieldFilter{{field: col("t.id"), conditions: []filterCondition{
 				{comparator: and, operator: OpGt, values: []string{"3"}},
 				{comparator: and, operator: OpLt, values: []string{"5"}},
 				eq(or, "7"),
@@ -43,39 +43,39 @@ func TestFilterExpr(t *testing.T) {
 		},
 		{
 			name:     "id=5 or id=7",
-			filters:  []columnFilter{{column: "t.id", conditions: []filterCondition{eq(and, "5"), eq(or, "7")}}},
+			filters:  []fieldFilter{{field: col("t.id"), conditions: []filterCondition{eq(and, "5"), eq(or, "7")}}},
 			wantSQL:  "((t.id = ?) OR (t.id = ?))",
 			wantArgs: []any{"5", "7"},
 		},
 		{
 			name: "columns are ANDed",
-			filters: []columnFilter{
-				{column: "t.a", conditions: []filterCondition{eq(and, "1")}},
-				{column: "t.b", conditions: []filterCondition{eq(and, "2"), eq(and, "3")}},
+			filters: []fieldFilter{
+				{field: col("t.a"), conditions: []filterCondition{eq(and, "1")}},
+				{field: col("t.b"), conditions: []filterCondition{eq(and, "2"), eq(and, "3")}},
 			},
 			wantSQL:  "((t.a = ?) AND ((t.b = ?) AND (t.b = ?)))",
 			wantArgs: []any{"1", "2", "3"},
 		},
 		{
 			name: "columns starting with $or form one OR group",
-			filters: []columnFilter{
-				{column: "t.a", conditions: []filterCondition{eq(or, "1")}},
-				{column: "t.b", conditions: []filterCondition{eq(or, "2")}},
-				{column: "t.c", conditions: []filterCondition{eq(and, "3")}},
+			filters: []fieldFilter{
+				{field: col("t.a"), conditions: []filterCondition{eq(or, "1")}},
+				{field: col("t.b"), conditions: []filterCondition{eq(or, "2")}},
+				{field: col("t.c"), conditions: []filterCondition{eq(and, "3")}},
 			},
 			wantSQL:  "(((t.a = ?) OR (t.b = ?)) AND (t.c = ?))",
 			wantArgs: []any{"1", "2", "3"},
 		},
 		{
 			name: "not",
-			filters: []columnFilter{{column: "t.seen_at", conditions: []filterCondition{
+			filters: []fieldFilter{{field: col("t.seen_at"), conditions: []filterCondition{
 				{comparator: and, not: true, operator: OpNull},
 			}}},
 			wantSQL: "NOT (t.seen_at IS NULL)",
 		},
 		{
 			name: "in renders one placeholder per value",
-			filters: []columnFilter{{column: "t.id", conditions: []filterCondition{
+			filters: []fieldFilter{{field: col("t.id"), conditions: []filterCondition{
 				{comparator: and, operator: OpIn, values: []string{"1", "2", "3"}},
 			}}},
 			wantSQL:  "t.id IN (?, ?, ?)",
@@ -83,7 +83,7 @@ func TestFilterExpr(t *testing.T) {
 		},
 		{
 			name: "between",
-			filters: []columnFilter{{column: "t.age", conditions: []filterCondition{
+			filters: []fieldFilter{{field: col("t.age"), conditions: []filterCondition{
 				{comparator: and, operator: OpBtw, values: []string{"4", "6"}},
 			}}},
 			wantSQL:  "t.age >= ? AND t.age <= ?",
@@ -91,7 +91,7 @@ func TestFilterExpr(t *testing.T) {
 		},
 		{
 			name: "between with a lower bound only",
-			filters: []columnFilter{{column: "t.age", conditions: []filterCondition{
+			filters: []fieldFilter{{field: col("t.age"), conditions: []filterCondition{
 				{comparator: and, operator: OpBtw, values: []string{"4"}},
 			}}},
 			wantSQL:  "t.age >= ?",
@@ -99,7 +99,7 @@ func TestFilterExpr(t *testing.T) {
 		},
 		{
 			name: "not between keeps the range together",
-			filters: []columnFilter{{column: "t.age", conditions: []filterCondition{
+			filters: []fieldFilter{{field: col("t.age"), conditions: []filterCondition{
 				{comparator: and, not: true, operator: OpBtw, values: []string{"4", "6"}},
 			}}},
 			wantSQL:  "NOT (t.age >= ? AND t.age <= ?)",
@@ -107,7 +107,7 @@ func TestFilterExpr(t *testing.T) {
 		},
 		{
 			name: "ilike and sw escape wildcards",
-			filters: []columnFilter{{column: "t.name", conditions: []filterCondition{
+			filters: []fieldFilter{{field: col("t.name"), conditions: []filterCondition{
 				{comparator: and, operator: OpILike, values: []string{"50%_off"}},
 				{comparator: and, operator: OpSw, values: []string{`a\b`}},
 			}}},
@@ -116,7 +116,7 @@ func TestFilterExpr(t *testing.T) {
 		},
 		{
 			name: "contains is array containment",
-			filters: []columnFilter{{column: "t.roles", conditions: []filterCondition{
+			filters: []fieldFilter{{field: col("t.roles"), conditions: []filterCondition{
 				{comparator: and, operator: OpContains, values: []string{"moderator", `a"b,c`}},
 			}}},
 			wantSQL:  "t.roles @> ?",
@@ -144,7 +144,7 @@ func TestFilterExpr(t *testing.T) {
 
 func TestFilterExprUnknownOperator(t *testing.T) {
 	t.Parallel()
-	_, err := filterExpr([]columnFilter{{column: "t.a", conditions: []filterCondition{{operator: "$regex", values: []string{"x"}}}}}, false)
+	_, err := filterExpr([]fieldFilter{{field: col("t.a"), conditions: []filterCondition{{operator: "$regex", values: []string{"x"}}}}}, false)
 	if err == nil {
 		t.Fatal("want error")
 	}
@@ -224,35 +224,73 @@ func TestArrayLiteral(t *testing.T) {
 	}
 }
 
-func TestSearchColumnsAndTerms(t *testing.T) {
+func TestSearchTerms(t *testing.T) {
 	t.Parallel()
-	searchable := []string{"t.name", "t.email", "t.phone"}
 	tests := []struct {
-		name        string
-		searchBy    []string
-		ignore      bool
-		multiWord   bool
-		search      string
-		wantColumns []string
-		wantTerms   []string
+		name      string
+		multiWord bool
+		search    string
+		want      []string
 	}{
-		{name: "no searchBy: all columns", search: "a", wantColumns: searchable, wantTerms: []string{"a"}},
-		{name: "searchBy narrows, keeps request order, drops duplicates and unknown", searchBy: []string{"t.phone", "t.name", "t.phone", "t.secret"}, search: "a", wantColumns: []string{"t.phone", "t.name"}, wantTerms: []string{"a"}},
-		{name: "ignored searchBy keeps all columns", searchBy: []string{"t.phone"}, ignore: true, search: "a", wantColumns: searchable, wantTerms: []string{"a"}},
-		{name: "whole term", search: " big  red ", wantColumns: searchable, wantTerms: []string{" big  red "}},
-		{name: "multi-word", multiWord: true, search: " big  red ", wantColumns: searchable, wantTerms: []string{"big", "red"}},
-		{name: "no search", search: "", wantColumns: searchable, wantTerms: nil},
+		{name: "whole term", search: " big  red ", want: []string{" big  red "}},
+		{name: "multi-word", multiWord: true, search: " big  red ", want: []string{"big", "red"}},
+		{name: "no search", search: "", want: nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			cfg := &Config{SearchableColumns: searchable, IgnoreSearchByInQueryParam: tc.ignore, MultiWordSearch: tc.multiWord}
-			if got := searchColumns(tc.searchBy, cfg); !reflect.DeepEqual(got, tc.wantColumns) {
-				t.Fatalf("columns: want %v, got %v", tc.wantColumns, got)
-			}
-			if got := searchTerms(tc.search, cfg); !reflect.DeepEqual(got, tc.wantTerms) {
-				t.Fatalf("terms: want %q, got %q", tc.wantTerms, got)
+			if got := searchTerms(tc.search, tc.multiWord); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("terms: want %q, got %q", tc.want, got)
 			}
 		})
 	}
+}
+
+func TestSearchFields(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Fields: []Field{
+			{Name: "name", Column: "t.name", Searchable: true},
+			{Name: "email", Column: "t.email", Searchable: true},
+			{Name: "phone", Column: "t.phone", Searchable: true},
+			{Name: "secret", Column: "t.secret"},
+		},
+		TieBreak: "t.id",
+	}
+	tests := []struct {
+		name     string
+		searchBy []string
+		ignore   bool
+		lenient  bool
+		want     []string
+	}{
+		{name: "no searchBy: every searchable field", want: []string{"name", "email", "phone"}},
+		{name: "searchBy narrows, keeps request order, drops duplicates", searchBy: []string{"phone", "name", "phone"}, want: []string{"phone", "name"}},
+		{name: "Lenient drops fields that are not searchable", searchBy: []string{"phone", "secret", "unknown"}, lenient: true, want: []string{"phone"}},
+		{name: "ignored searchBy keeps every field", searchBy: []string{"phone"}, ignore: true, want: []string{"name", "email", "phone"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := cfg
+			cfg.IgnoreSearchByInQueryParam, cfg.Lenient = tc.ignore, tc.lenient
+			e := MustCompile(cfg)
+			fields, err := e.searchFields(&Request{SearchBy: tc.searchBy})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, field := range fields {
+				got = append(got, field.Name)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("want %v, got %v", tc.want, got)
+			}
+		})
+	}
+}
+
+// col is a field reading column, for rendering tests.
+func col(column string) *Field {
+	return &Field{Name: column, Column: column}
 }

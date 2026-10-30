@@ -2,10 +2,12 @@
 
 Reference:
 
+- [Configuration](configuration.md): fields, types, every `Config` setting, tags, the GORM builder, `Compile`.
 - [Query syntax](query-syntax.md): every query parameter, how it is parsed, links.
 - [Filters](filters.md): operators, `$not`, `$and`/`$or` chains, filter expressions, value types, caps.
 - [Sorting and tie-breaker](sorting.md): key priority, defaults, `NULLS FIRST/LAST`, stable pages.
-- [Configuration](configuration.md): every `Config` field, defaults, `Validate`.
+- [Pages and counts](pagination.md): page numbers or cursors (keyset pagination); exact, estimated or no counts.
+- [Errors](errors.md): codes, fields, `HTTPStatus` and the JSON of a 400.
 - [Security](security.md): what a client can and cannot do, and the knobs that change it.
 
 nestjs-paginate:
@@ -16,14 +18,14 @@ nestjs-paginate:
 Use cases:
 
 - [net/http (chi) + GORM](use-cases/chi-gorm.md): a list endpoint from handler to repository.
-- [GORM builder](use-cases/gorm-builder.md): configs from model and DTO fields, embedded base models.
+- [GORM: tags and the builder](use-cases/gorm-builder.md): configs from a model's tags, or from model and DTO fields.
 - [squirrel + pgx, fasthttp](use-cases/squirrel-pgx.md): the SQL builder executor.
 - [Joins, aliases, GROUP BY, subqueries](use-cases/joins-and-aliases.md): complex queries.
-- [Exports and counts](use-cases/exports-and-counts.md): every row for the server, totals only for the client.
+- [Exports and counts](use-cases/exports-and-counts.md): every row for the server, totals only for the client, big tables.
 - [gRPC and other transports](use-cases/grpc.md): passing requests and meta between services.
 - [OpenAPI](use-cases/openapi.md): documenting the parameters and the answer.
-- [A custom executor](use-cases/custom-executor.md): `paginate.Prepare` on database/sql or any other library.
-- [Testing a config](use-cases/testing.md): `Validate`, builder errors and SQL snapshots.
+- [A custom executor](use-cases/custom-executor.md): `Endpoint.Prepare` and `NewResponse` on database/sql or any other library.
+- [Testing a config](use-cases/testing.md): `Compile`, builder errors and SQL snapshots.
 
 Performance and examples:
 

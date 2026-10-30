@@ -3,40 +3,50 @@ package paginate
 import (
 	"errors"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 )
 
 func usersConfig() Config {
-	cfg := NewConfig("users", []string{"users.created_at", "users.name"}, map[string]string{
-		"createdAt": "users.created_at",
-		"name":      "users.name",
-		"email":     "users.email",
-		"fullName":  "users.name",
-		"age":       "users.age",
-	})
-	cfg.SearchableColumns = []string{"users.name", "users.email"}
-	cfg.FilterableColumns = FilterableColumns{"users.name": AllOperators, "users.email": {}, "users.age": {OpGte}}
-	cfg.TieBreakColumn = "users.id"
-	return *cfg
+	return Config{
+		Fields: []Field{
+			{Name: "id", Column: "users.id", Type: Int},
+			{Name: "createdAt", Column: "users.created_at", Type: Time, Sortable: true},
+			{Name: "name", Column: "users.name", Sortable: true, Searchable: true, Filter: AllOperators},
+			{Name: "email", Column: "users.email", Searchable: true, Filter: []Operator{OpEq}},
+			{Name: "fullName", Column: "users.name", Filter: []Operator{OpEq}},
+			{Name: "age", Column: "users.age", Type: Int, Filter: []Operator{OpGte}},
+		},
+		TieBreak: "users.id",
+	}
 }
 
-func TestNormalizeConfigDefaults(t *testing.T) {
-	t.Parallel()
-	cfg := Config{TableName: "users", DefaultLimit: 500}
-	if err := normalizeConfig(&cfg); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+// compile compiles usersConfig changed by change.
+func compile(t testing.TB, change func(cfg *Config)) *Endpoint {
+	t.Helper()
+	cfg := usersConfig()
+	if change != nil {
+		change(&cfg)
 	}
-	if cfg.MaxLimit != DefaultMaxLimit || cfg.DefaultLimit != DefaultMaxLimit {
-		t.Fatalf("the default limit must be capped by the max limit, got %d/%d", cfg.DefaultLimit, cfg.MaxLimit)
+	e, err := Compile(cfg)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if cfg.MaxSearchLength != DefaultMaxSearchLength || cfg.MaxFilterConditions != DefaultMaxFilterConditions ||
-		cfg.MaxFilterValues != DefaultMaxFilterValues || cfg.MaxFilterExpressionComplexity != DefaultMaxFilterExpressionComplexity {
-		t.Fatalf("caps must get defaults, got %+v", cfg)
+	return e
+}
+
+// wantError checks that err is an invalid request with code, field and message.
+func wantError(t *testing.T, err error, code Code, field, message string) {
+	t.Helper()
+	var pe *Error
+	if !errors.As(err, &pe) || !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("want an invalid request, got %v", err)
 	}
-	if err := normalizeConfig(&Config{}); !errors.Is(err, ErrInvalidConfig) {
-		t.Fatalf("want a config error without a table, got %v", err)
+	if pe.Code != code || pe.Field != field || !strings.Contains(pe.Message, message) {
+		t.Fatalf("want %s/%q/%q, got %s/%q/%q", code, field, message, pe.Code, pe.Field, pe.Message)
 	}
 }
 
@@ -47,7 +57,9 @@ func TestPrepare(t *testing.T) {
 		req     Request
 		config  func(cfg *Config)
 		check   func(t *testing.T, req Request, q *Query)
-		wantErr string
+		code    Code
+		field   string
+		message string
 	}{
 		{
 			name: "defaults",
@@ -57,6 +69,9 @@ func TestPrepare(t *testing.T) {
 				}
 				if !reflect.DeepEqual(q.Sort, []SortEntry{{"users.created_at", Asc}}) || q.TieBreak != "users.id" {
 					t.Fatalf("sort: %v %q", q.Sort, q.TieBreak)
+				}
+				if q.Count != CountExact || q.FetchLimit() != DefaultLimit || q.Keyset {
+					t.Fatalf("count %v, fetch %d, keyset %v", q.Count, q.FetchLimit(), q.Keyset)
 				}
 			},
 		},
@@ -69,26 +84,24 @@ func TestPrepare(t *testing.T) {
 				}
 			},
 		},
-		{name: "page whose offset overflows", req: Request{Page: math.MaxUint64, Limit: 100}, wantErr: "is too large"},
+		{name: "page whose offset overflows", req: Request{Page: math.MaxUint64, Limit: 100}, code: CodeInvalidPage, message: "is too large"},
 		{name: "largest page that fits", req: Request{Page: math.MaxInt/100 + 1, Limit: 100}},
 		{
-			name: "fields map to columns, order is normalized",
+			name: "fields map to columns, the order is normalized",
 			req: Request{
-				SortBy:   SortBy{"createdAt": "DESC"},
-				SortKeys: []string{"createdAt"},
+				SortBy:   []Sort{{Field: "createdAt", Order: "desc"}},
 				Search:   "ann",
 				SearchBy: []string{"email"},
 				Filter:   FilterQuery{"name": {"$sw:a"}, "fullName": {"$or:b"}},
 			},
-			check: func(t *testing.T, _ Request, q *Query) {
-				if !reflect.DeepEqual(q.Sort, []SortEntry{{"users.created_at", Desc}}) {
-					t.Fatalf("sort: %v", q.Sort)
+			check: func(t *testing.T, req Request, q *Query) {
+				if !reflect.DeepEqual(q.Sort, []SortEntry{{"users.created_at", Desc}}) || req.SortBy[0].Order != Desc {
+					t.Fatalf("sort: %v, request %v", q.Sort, req.SortBy)
 				}
 				want := []Condition{
 					{SQL: "CAST(users.email AS TEXT) ILIKE ?", Args: []any{"%ann%"}},
-					// fullName and name map to one column: their values chain in field order, and the
-					// $or of the first value of a chain is not used inside it.
-					{SQL: "(users.name = ?) AND (CAST(users.name AS TEXT) ILIKE ?)", Args: []any{"b", "a%"}},
+					// fullName starts with $or, so it opens the OR group; name is ANDed with it.
+					{SQL: "((users.name = ?) AND (CAST(users.name AS TEXT) ILIKE ?))", Args: []any{"b", "a%"}},
 				}
 				if !reflect.DeepEqual(q.Where, want) {
 					t.Fatalf("where:\nwant %#v\ngot  %#v", want, q.Where)
@@ -108,43 +121,70 @@ func TestPrepare(t *testing.T) {
 				}
 			},
 		},
-		{name: "order that is neither asc nor desc", req: Request{SortBy: SortBy{"createdAt": "desc; DROP TABLE users"}}, wantErr: "sort order of createdAt"},
-		{name: "unknown sort field", req: Request{SortBy: SortBy{"password": Asc}}, wantErr: "sorting by password is not allowed"},
 		{
-			name:   "unknown fields are dropped without strict validation",
-			req:    Request{SortBy: SortBy{"password": Asc}, SearchBy: []string{"password"}, Filter: FilterQuery{"password": {"x"}}},
-			config: func(cfg *Config) { cfg.StrictValidate = false },
+			name:    "order that is neither ASC nor DESC",
+			req:     Request{SortBy: []Sort{{Field: "createdAt", Order: "desc; DROP TABLE users"}}},
+			code:    CodeInvalidSort,
+			field:   "createdAt",
+			message: "sort order of createdAt",
+		},
+		{name: "unknown sort field", req: Request{SortBy: []Sort{{"password", Asc}}}, code: CodeSortNotAllowed, field: "password", message: "sorting by password is not allowed"},
+		{name: "field that is not sortable", req: Request{SortBy: []Sort{{"email", Asc}}}, code: CodeSortNotAllowed, field: "email", message: "sorting by email"},
+		{
+			name:   "Lenient drops unknown fields and what is not allowed",
+			req:    Request{SortBy: []Sort{{"password", Asc}, {"email", Asc}}, SearchBy: []string{"password", "age"}, Filter: FilterQuery{"password": {"x"}, "createdAt": {"x"}, "email": {"$gt:a"}}},
+			config: func(cfg *Config) { cfg.Lenient = true },
 			check: func(t *testing.T, _ Request, q *Query) {
 				if len(q.Where) != 0 || !reflect.DeepEqual(q.Sort, []SortEntry{{"users.created_at", Asc}}) {
-					t.Fatalf("unknown fields must be dropped: %+v", q)
+					t.Fatalf("the request must be dropped: %+v", q)
 				}
 			},
 		},
-		{name: "unknown searchBy field", req: Request{SearchBy: []string{"password"}}, wantErr: "searching by password is not allowed"},
+		{
+			name:    "Lenient does not forgive invalid values",
+			req:     Request{Filter: FilterQuery{"age": {"$gte:old"}}},
+			config:  func(cfg *Config) { cfg.Lenient = true },
+			code:    CodeInvalidValue,
+			field:   "age",
+			message: `invalid value "old" for age: must be an integer`,
+		},
+		{name: "unknown searchBy field", req: Request{SearchBy: []string{"password"}}, code: CodeSearchNotAllowed, field: "password", message: "searching by password is not allowed"},
+		{name: "searchBy field that is not searchable", req: Request{SearchBy: []string{"age"}}, code: CodeSearchNotAllowed, field: "age", message: "searching by age"},
 		{
 			name:   "ignored searchBy is not checked",
 			req:    Request{Search: "x", SearchBy: []string{"password"}},
 			config: func(cfg *Config) { cfg.IgnoreSearchByInQueryParam = true },
 			check: func(t *testing.T, _ Request, q *Query) {
 				if len(q.Where) != 1 || !strings.Contains(q.Where[0].SQL, "users.email") {
-					t.Fatalf("the search must cover every searchable column: %+v", q.Where)
+					t.Fatalf("the search must cover every searchable field: %+v", q.Where)
 				}
 			},
 		},
-		{name: "unknown filter field", req: Request{Filter: FilterQuery{"password": {"x"}}}, wantErr: "unknown filter field password"},
+		{name: "unknown filter field", req: Request{Filter: FilterQuery{"password": {"x"}}}, code: CodeUnknownField, field: "password", message: "unknown filter field password"},
+		{name: "field that is not filterable", req: Request{Filter: FilterQuery{"createdAt": {"x"}}}, code: CodeFilterNotAllowed, field: "createdAt", message: "filter on createdAt is not allowed"},
+		{name: "operator that is not allowed", req: Request{Filter: FilterQuery{"email": {"$gt:a"}}}, code: CodeOperatorNotAllowed, field: "email", message: "operator $gt is not allowed for email"},
+		{name: "value of the wrong type", req: Request{Filter: FilterQuery{"age": {"$gte:abc"}}}, code: CodeInvalidValue, field: "age", message: "must be an integer"},
 		{
-			name:    "malformed expression fails even without strict validation",
+			name:    "malformed expression fails even with Lenient",
 			req:     Request{FilterExpression: "(name=a"},
-			config:  func(cfg *Config) { cfg.StrictValidate = false },
-			wantErr: `expected ")"`,
+			config:  func(cfg *Config) { cfg.Lenient = true },
+			code:    CodeInvalidExpression,
+			message: `expected ")"`,
 		},
-		{name: "search over the cap", req: Request{Search: strings.Repeat("я", 11)}, config: func(cfg *Config) { cfg.MaxSearchLength = 10 }, wantErr: "longer than 10 characters"},
+		{
+			name:    "search over the cap",
+			req:     Request{Search: strings.Repeat("я", 11)},
+			config:  func(cfg *Config) { cfg.MaxSearchLength = 10 },
+			code:    CodeSearchTooLong,
+			message: "longer than 10 characters",
+		},
 		{name: "search at the cap counts characters, not bytes", req: Request{Search: strings.Repeat("я", 10)}, config: func(cfg *Config) { cfg.MaxSearchLength = 10 }},
 		{
 			name:    "too many filter values, unknown fields included",
 			req:     Request{Filter: FilterQuery{"name": {"a", "b"}, "password": {"c"}}},
-			config:  func(cfg *Config) { cfg.StrictValidate = false; cfg.MaxFilterConditions = 2 },
-			wantErr: "too many filter values",
+			config:  func(cfg *Config) { cfg.Lenient = true; cfg.MaxFilterConditions = 2 },
+			code:    CodeTooManyValues,
+			message: "too many filter values",
 		},
 		{
 			name: "client asks for every row: refused by default",
@@ -156,12 +196,12 @@ func TestPrepare(t *testing.T) {
 			},
 		},
 		{
-			name:   "client asks for every row: allowed by the config",
+			name:   "client asks for every row: allowed by the config, read without a count",
 			req:    clientMode(ModeDisabled),
 			config: func(cfg *Config) { cfg.AllowDisabledPagination = true },
 			check: func(t *testing.T, req Request, q *Query) {
-				if q.Mode != ModeDisabled || req.Mode != ModeDisabled {
-					t.Fatalf("mode %q/%q", q.Mode, req.Mode)
+				if q.Mode != ModeDisabled || req.Mode != ModeDisabled || q.Count != CountNone {
+					t.Fatalf("mode %q/%q, count %v", q.Mode, req.Mode, q.Count)
 				}
 			},
 		},
@@ -198,6 +238,34 @@ func TestPrepare(t *testing.T) {
 			},
 		},
 		{
+			name:   "CountNone reads a row ahead",
+			config: func(cfg *Config) { cfg.Count = CountNone },
+			check: func(t *testing.T, _ Request, q *Query) {
+				if q.Count != CountNone || q.FetchLimit() != DefaultLimit+1 {
+					t.Fatalf("count %v, fetch %d", q.Count, q.FetchLimit())
+				}
+			},
+		},
+		{
+			name:   "a count-only request is counted under CountNone",
+			req:    clientMode(ModeCount),
+			config: func(cfg *Config) { cfg.Count = CountNone },
+			check: func(t *testing.T, _ Request, q *Query) {
+				if q.Count != CountExact {
+					t.Fatalf("count %v", q.Count)
+				}
+			},
+		},
+		{
+			name:   "estimates and the parallel count reach the query",
+			config: func(cfg *Config) { cfg.Count = CountEstimate; cfg.ExactCountBelow = 1000; cfg.ParallelCount = true },
+			check: func(t *testing.T, _ Request, q *Query) {
+				if q.Count != CountEstimate || q.ExactCountBelow != 1000 || !q.Parallel || q.FetchLimit() != DefaultLimit {
+					t.Fatalf("query %+v", q)
+				}
+			},
+		},
+		{
 			name: "withDeleted needs the config",
 			req:  Request{WithDeleted: true},
 			check: func(t *testing.T, _ Request, q *Query) {
@@ -210,16 +278,11 @@ func TestPrepare(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			cfg := usersConfig()
-			if tc.config != nil {
-				tc.config(&cfg)
-			}
+			e := compile(t, tc.config)
 			req := tc.req
-			q, err := Prepare(&req, cfg)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !errors.Is(err, ErrInvalidRequest) {
-					t.Fatalf("want an invalid request with %q, got %v", tc.wantErr, err)
-				}
+			q, err := e.Prepare(&req)
+			if tc.code != "" {
+				wantError(t, err, tc.code, tc.field, tc.message)
 				return
 			}
 			if err != nil {
@@ -241,12 +304,17 @@ func clientMode(mode Mode) Request {
 func TestWrapError(t *testing.T) {
 	t.Parallel()
 	dataException := stateError{state: "22P02", message: `invalid input syntax for type uuid: "x"`}
-	q := Query{filtered: true}
-	if err := q.WrapError("select", dataException); !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), "invalid input syntax") {
-		t.Fatalf("want an invalid request, got %v", err)
+	q := Query{clientValues: true}
+	err := q.WrapError("select", dataException)
+	var pe *Error
+	if !errors.As(err, &pe) || pe.Code != CodeInvalidValue || !strings.Contains(err.Error(), "invalid input syntax") {
+		t.Fatalf("want an invalid value, got %v", err)
+	}
+	if !errors.As(err, new(stateError)) {
+		t.Fatal("the database error must stay reachable for logs")
 	}
 	if err := (&Query{}).WrapError("select", dataException); errors.Is(err, ErrInvalidRequest) {
-		t.Fatal("without filters a data exception is the server's problem")
+		t.Fatal("without client values a data exception is the server's problem")
 	}
 	other := stateError{state: "42P01", message: "relation does not exist"}
 	if err := q.WrapError("select", other); errors.Is(err, ErrInvalidRequest) || !errors.As(err, new(stateError)) {
@@ -261,36 +329,117 @@ type stateError struct {
 func (e stateError) Error() string    { return e.message }
 func (e stateError) SQLState() string { return e.state }
 
-func TestConfigValidate(t *testing.T) {
+func TestCompile(t *testing.T) {
 	t.Parallel()
-	if err := usersConfig().Validate(); err != nil {
-		t.Fatalf("valid config: %v", err)
+	e := compile(t, func(cfg *Config) { cfg.DefaultLimit = 500 })
+	cfg := e.Config()
+	if cfg.MaxLimit != DefaultMaxLimit || cfg.DefaultLimit != DefaultMaxLimit {
+		t.Fatalf("the default limit must be capped by the max limit, got %d/%d", cfg.DefaultLimit, cfg.MaxLimit)
+	}
+	if cfg.MaxSearchLength != DefaultMaxSearchLength || cfg.MaxFilterConditions != DefaultMaxFilterConditions ||
+		cfg.MaxFilterValues != DefaultMaxFilterValues || cfg.MaxFilterExpressionComplexity != DefaultMaxFilterExpressionComplexity {
+		t.Fatalf("caps must get defaults, got %+v", cfg)
 	}
 
 	broken := usersConfig()
-	broken.TableName = ""
-	broken.SortableColumns = append(broken.SortableColumns, "rating")
-	broken.SearchableColumns = append(broken.SearchableColumns, "users.bio")
-	broken.FilterableColumns["users.phone"] = []Operator{"$regex"}
-	broken.DefaultSortBy = SortBy{"users.name": "up"}
+	broken.Fields = append(broken.Fields,
+		Field{Column: "users.bio"},
+		Field{Name: "phone"},
+		Field{Name: "name", Column: "users.nickname"},
+		Field{Name: "rank", Column: "users.rank", Filter: []Operator{"$regex", OpOr}},
+		Field{Name: "score", Column: "users.score", Type: Int, Filter: []Operator{OpContains}},
+		Field{Name: "state", Column: "users.state", Type: Enum()},
+	)
+	broken.DefaultSort = []Sort{{"rating", Asc}, {"name", "up"}}
 	broken.DefaultLimit, broken.MaxLimit = 50, 10
 	broken.Format = "xml"
-	err := broken.Validate()
+	broken.Pagination = CursorPagination
+	broken.TieBreak = ""
+	broken.Count = 7
+	_, err := Compile(broken)
 	if !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("want a config error, got %v", err)
 	}
 	for _, want := range []string{
-		"tableName is required",
-		"sortable column rating: no API field maps to it",
-		"searchable column users.bio: no API field maps to it",
-		"filterable column users.phone: no API field maps to it",
-		"filterable column users.phone: unknown operator $regex",
-		`default sort users.name: order must be asc or desc, got "up"`,
+		"field 6: name is required",
+		"field phone: column is required",
+		"field name: defined twice",
+		"field rank: unknown operator $regex",
+		"field rank: $or is not an operator",
+		"field score: $contains needs an array type, the field is int",
+		"field state: an enum needs values",
+		"default sort: unknown field rating",
+		`default sort name: order must be ASC or DESC, got "up"`,
 		"defaultLimit 50 exceeds maxLimit 10",
 		`unknown format "xml"`,
+		"cursor pagination needs a TieBreak",
+		"unknown count 7",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %q in %v", want, err)
 		}
+	}
+
+	if _, err := Compile(Config{Fields: []Field{{Name: "a", Column: "t.a"}}}); err == nil || !strings.Contains(err.Error(), "no sort") {
+		t.Fatalf("want an error for an endpoint without any sort, got %v", err)
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("MustCompile must panic on a broken config")
+		}
+	}()
+	MustCompile(broken)
+}
+
+func TestEndpointFieldsAreCopies(t *testing.T) {
+	t.Parallel()
+	e := compile(t, nil)
+	fields := e.Fields()
+	fields[2].Filter[0] = "$changed"
+	fields[2].Name = "changed"
+	if again := e.Fields(); again[2].Name != "name" || again[2].Filter[0] != OpEq {
+		t.Fatalf("Fields must return copies, got %+v", again[2])
+	}
+}
+
+func TestPrepareLeavesTheSortSliceAlone(t *testing.T) {
+	t.Parallel()
+	e := compile(t, nil)
+	shared := []Sort{{Field: "createdAt", Order: "desc"}}
+	req := Request{SortBy: shared}
+	if _, err := e.Prepare(&req); err != nil {
+		t.Fatal(err)
+	}
+	if shared[0].Order != "desc" || req.SortBy[0].Order != Desc {
+		t.Fatalf("Prepare must normalize a copy: shared %v, request %v", shared, req.SortBy)
+	}
+}
+
+func TestHugeNumbers(t *testing.T) {
+	t.Parallel()
+	req, err := ParseRequest(httptest.NewRequest(http.MethodGet, "/users?page=99999999999999999999", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = compile(t, nil).Prepare(req)
+	wantError(t, err, CodeInvalidPage, "", "is too large")
+
+	req, err = ParseRequest(httptest.NewRequest(http.MethodGet, "/users?limit=99999999999999999999", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q, err := compile(t, nil).Prepare(req); err != nil || q.Limit != DefaultMaxLimit {
+		t.Fatalf("a huge limit is capped: %v %v", q, err)
+	}
+}
+
+func TestFieldsListEq(t *testing.T) {
+	t.Parallel()
+	fields := compile(t, nil).Fields()
+	if got := fields[5].Filter; !reflect.DeepEqual(got, []Operator{OpEq, OpGte}) {
+		t.Fatalf("the operators of a filterable field include $eq: %v", got)
+	}
+	if fields[0].Filter != nil {
+		t.Fatalf("a field that is not filterable has no operators: %v", fields[0].Filter)
 	}
 }

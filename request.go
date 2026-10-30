@@ -7,12 +7,12 @@ type FilterQuery map[string][]string
 type Mode string
 
 const (
-	// ModeDefault returns a page and the total count.
+	// ModeDefault returns a page.
 	ModeDefault Mode = "default"
 	// ModeCount returns the total count without rows (?limit=0 or ?paginationMode=count).
 	ModeCount Mode = "count"
-	// ModeDisabled returns every matching row and the total count (?limit=-1 or
-	// ?paginationMode=disabled). Clients get it only when Config.AllowDisabledPagination is set.
+	// ModeDisabled returns every matching row (?limit=-1 or ?paginationMode=disabled). Clients get
+	// it only when Config.AllowDisabledPagination is set.
 	ModeDisabled Mode = "disabled"
 )
 
@@ -25,18 +25,16 @@ func parseMode(value string) Mode {
 	return ModeDefault
 }
 
-// Request is a parsed list request, in the client's terms: API field names, raw filter values.
-// The parsers fill it; Prepare checks it against a Config.
+// Request is a parsed list request in the client's terms: API field names, raw filter values. The
+// parsers fill it; Endpoint.Prepare checks it. It is a plain struct: build it in code the way a
+// parser would, or pass it to another service as JSON.
 type Request struct {
-	// Page is the page number, from 1; zero means the first page.
+	// Page is the page number, from 1; zero means the first page. Cursor pagination ignores it.
 	Page uint64 `json:"page,omitempty"`
 	// Limit is the page size; zero means the default.
 	Limit uint64 `json:"limit,omitempty"`
-	// SortBy is sortBy as the client sent it: API field to direction.
-	SortBy SortBy `json:"sortBy,omitempty"`
-	// SortKeys is the order of the sortBy keys, the first is the main key. SortBy is a map and
-	// keeps no order; without this list the keys follow SortableColumns.
-	SortKeys []string `json:"sortKeys,omitempty"`
+	// SortBy are the sort keys in priority order: the first is the main key.
+	SortBy []Sort `json:"sortBy,omitempty"`
 	// Search is the search term.
 	Search string `json:"search,omitempty"`
 	// SearchBy are the API fields the client narrowed the search to.
@@ -46,6 +44,9 @@ type Request struct {
 	// FilterExpression is the filter=<expression> parameter, ANDed with Filter:
 	// (status=$eq:paid OR total=$gte:1000) AND NOT comment=$null.
 	FilterExpression string `json:"filterExpression,omitempty"`
+	// Cursor is the cursor of a page of an endpoint with cursor pagination, taken from the links or
+	// the meta of the previous answer; empty for the first page.
+	Cursor string `json:"cursor,omitempty"`
 	// Mode is the mode the request runs in. A mode server code sets here is applied as is.
 	Mode Mode `json:"mode,omitempty"`
 	// RequestedMode is the mode the client asked for. Count takes effect at once; disabled waits
@@ -55,9 +56,6 @@ type Request struct {
 	WithDeleted bool `json:"withDeleted,omitempty"`
 	// Path is the path of the HTTP request, set by the parsers; links start with it.
 	Path string `json:"path,omitempty"`
-
-	// view keeps what the answer needs from Prepare.
-	view *responseView
 }
 
 // requestMode records the mode a client asked for: count at once, disabled after the config check.
@@ -68,7 +66,8 @@ func (r *Request) requestMode(mode Mode) {
 	}
 }
 
-// hasFilters reports filter values or a filter expression in the request.
-func (r *Request) hasFilters() bool {
-	return len(r.Filter) != 0 || r.FilterExpression != ""
+// hasClientValues reports values of the client that reach the SQL as arguments compared with
+// columns: filters, a filter expression, a cursor.
+func (r *Request) hasClientValues() bool {
+	return len(r.Filter) != 0 || r.FilterExpression != "" || r.Cursor != ""
 }

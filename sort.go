@@ -1,8 +1,9 @@
 package paginate
 
 import (
-	"maps"
-	"slices"
+	"encoding/json"
+	"fmt"
+	"strings"
 )
 
 // Order is the direction of a sort key.
@@ -10,16 +11,55 @@ type Order string
 
 const (
 	// Asc sorts ascending.
-	Asc Order = "asc"
+	Asc Order = "ASC"
 	// Desc sorts descending.
-	Desc Order = "desc"
+	Desc Order = "DESC"
 )
 
-// SortBy maps a field (API names in a Request, columns in a Config) to its direction.
-type SortBy map[string]Order
+// parseOrder reads asc or desc in any case.
+func parseOrder(value string) (Order, bool) {
+	switch order := Order(strings.ToUpper(value)); order {
+	case Asc, Desc:
+		return order, true
+	}
+	return "", false
+}
 
-// SortEntry is one key of ORDER BY. The order of entries is the order of the keys: the first is the
-// main one, the next ones order rows with equal values.
+func (o Order) reverse() Order {
+	if o == Desc {
+		return Asc
+	}
+	return Desc
+}
+
+// Sort is a sort key in API terms: sortBy=createdAt:DESC is {Field: "createdAt", Order: Desc}. Its
+// JSON is a pair, ["createdAt", "DESC"], as nestjs-paginate writes meta.sortBy.
+type Sort struct {
+	Field string
+	Order Order
+}
+
+// MarshalJSON writes the pair [field, order].
+func (s Sort) MarshalJSON() ([]byte, error) {
+	return marshalJSON([2]string{s.Field, string(s.Order)})
+}
+
+// UnmarshalJSON reads the pair [field, order]; the order may be in any case.
+func (s *Sort) UnmarshalJSON(data []byte) error {
+	var pair [2]string
+	if err := json.Unmarshal(data, &pair); err != nil {
+		return err
+	}
+	order, ok := parseOrder(pair[1])
+	if !ok {
+		return fmt.Errorf("paginate: sort order of %s must be ASC or DESC, got %q", pair[0], pair[1])
+	}
+	*s = Sort{Field: pair[0], Order: order}
+	return nil
+}
+
+// SortEntry is a key of ORDER BY in SQL terms. The first entry is the main key; the next ones
+// order rows with equal values.
 type SortEntry struct {
 	Column string
 	Order  Order
@@ -35,70 +75,21 @@ const (
 	NullsLast
 )
 
-// sortEntries orders the sort keys of a request:
-//  1. request keys in Request.SortKeys order (the parsers keep the order of the parameters);
-//  2. the other SortBy keys (a request built in code: order unknown) in SortableColumns order;
-//  3. without request keys, DefaultSortBy in DefaultSortKeys order, then alphabetically;
-//  4. otherwise the first sortable column ascending.
-//
-// sortBy holds the request keys already mapped to columns. Keys that are not sortable are dropped.
-func sortEntries(req *Request, sortBy map[string]Order, cfg *Config) ([]SortEntry, error) {
-	if len(cfg.SortableColumns) == 0 {
-		return nil, invalidConfig("sortableColumns is required")
+// nullsLast tells where the NULL values of a key go: where NullSort says, otherwise where Postgres
+// puts them, last for ASC and first for DESC.
+func nullsLast(order Order, nullSort NullSort) bool {
+	switch nullSort {
+	case NullsFirst:
+		return false
+	case NullsLast:
+		return true
 	}
-
-	entries := make([]SortEntry, 0, len(sortBy))
-	seen := make(map[string]bool, len(sortBy))
-	add := func(column string) {
-		order, ok := sortBy[column]
-		if !ok || seen[column] || !slices.Contains(cfg.SortableColumns, column) {
-			return
-		}
-		seen[column] = true
-		entries = append(entries, SortEntry{Column: column, Order: order})
-	}
-	if len(sortBy) != 0 {
-		for _, key := range req.SortKeys {
-			if column, ok := cfg.FieldColumns[key]; ok {
-				add(column)
-			}
-		}
-		for _, column := range cfg.SortableColumns {
-			add(column)
-		}
-	}
-
-	if len(entries) == 0 {
-		entries = defaultSortEntries(cfg)
-	}
-	return entries, nil
-}
-
-// defaultSortEntries is the sort of a request without keys: DefaultSortBy in DefaultSortKeys order,
-// the rest of DefaultSortBy alphabetically, otherwise the first sortable column ascending.
-func defaultSortEntries(cfg *Config) []SortEntry {
-	entries := make([]SortEntry, 0, len(cfg.DefaultSortBy))
-	seen := make(map[string]bool, len(cfg.DefaultSortBy))
-	for _, column := range cfg.DefaultSortKeys {
-		if order, ok := cfg.DefaultSortBy[column]; ok && !seen[column] {
-			seen[column] = true
-			entries = append(entries, SortEntry{Column: column, Order: order})
-		}
-	}
-	for _, column := range slices.Sorted(maps.Keys(cfg.DefaultSortBy)) {
-		if !seen[column] {
-			entries = append(entries, SortEntry{Column: column, Order: cfg.DefaultSortBy[column]})
-		}
-	}
-	if len(entries) == 0 {
-		entries = append(entries, SortEntry{Column: cfg.SortableColumns[0], Order: Asc})
-	}
-	return entries
+	return order == Asc
 }
 
 // appendTieBreak appends the tie-breaker (a unique column, ascending) as the last key, so rows with
-// equal values of the other keys keep their order between LIMIT/OFFSET pages. A column that is
-// already a key is not added twice.
+// equal values of the other keys keep their order between pages. A column that is already a key
+// is not added twice.
 func appendTieBreak(entries []SortEntry, column string) []SortEntry {
 	if column == "" {
 		return entries
@@ -111,18 +102,31 @@ func appendTieBreak(entries []SortEntry, column string) []SortEntry {
 	return append(entries, SortEntry{Column: column, Order: Asc})
 }
 
-// orderByExprs renders the ORDER BY expressions in entry order, with NULLS FIRST/LAST.
-func orderByExprs(entries []SortEntry, nullSort NullSort) []string {
-	suffix := ""
-	switch nullSort {
-	case NullsFirst:
-		suffix = " NULLS FIRST"
-	case NullsLast:
-		suffix = " NULLS LAST"
-	}
+// orderByExprs renders the ORDER BY expressions in entry order. Read forward, a key gets NULLS
+// FIRST or LAST when NullSort says so. Read backward (paging back from a cursor), every key is
+// flipped together with its NULL placement, which is then always written out.
+func orderByExprs(entries []SortEntry, nullSort NullSort, backward bool) []string {
 	orderBy := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		orderBy = append(orderBy, entry.Column+" "+string(entry.Order)+suffix)
+		if !backward {
+			orderBy = append(orderBy, entry.Column+" "+string(entry.Order)+nullsSuffix(nullSort))
+			continue
+		}
+		placement := " NULLS LAST"
+		if nullsLast(entry.Order, nullSort) {
+			placement = " NULLS FIRST"
+		}
+		orderBy = append(orderBy, entry.Column+" "+string(entry.Order.reverse())+placement)
 	}
 	return orderBy
+}
+
+func nullsSuffix(nullSort NullSort) string {
+	switch nullSort {
+	case NullsFirst:
+		return " NULLS FIRST"
+	case NullsLast:
+		return " NULLS LAST"
+	}
+	return ""
 }

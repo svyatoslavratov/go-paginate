@@ -78,8 +78,8 @@ func namingDB() *gorm.DB {
 	return &gorm.DB{Config: &gorm.Config{NamingStrategy: schema.NamingStrategy{}}}
 }
 
-func buildErr(b *ConfigBuilder) error {
-	_, err := b.Build()
+func buildErr(b *Builder) error {
+	_, err := b.Config()
 	return err
 }
 
@@ -105,7 +105,7 @@ func TestBuilderColumns(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			b := NewConfigBuilder(namingDB(), "templates", &model, &dto)
+			b := NewBuilder(namingDB(), "templates", &model, &dto)
 			if got := b.Column(tc.field); got != tc.want {
 				t.Fatalf("want %q, got %q (errors: %v)", tc.want, got, buildErr(b))
 			}
@@ -135,7 +135,7 @@ func TestBuilderRejectsNonColumns(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			b := NewConfigBuilder(namingDB(), "templates", &model, &dto)
+			b := NewBuilder(namingDB(), "templates", &model, &dto)
 			if got := b.Column(tc.field); got != "" {
 				t.Fatalf("want no column, got %q", got)
 			}
@@ -166,7 +166,7 @@ func TestBuilderJSONNames(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			b := NewConfigBuilder(namingDB(), "templates", &model, &dto)
+			b := NewBuilder(namingDB(), "templates", &model, &dto)
 			got := b.JSONName(tc.field)
 			if tc.wantErr != "" {
 				if err := buildErr(b); got != "" || err == nil || !strings.Contains(err.Error(), tc.wantErr) {
@@ -181,37 +181,34 @@ func TestBuilderJSONNames(t *testing.T) {
 	}
 }
 
-func TestBuilderBuild(t *testing.T) {
+func TestBuilderConfig(t *testing.T) {
 	t.Parallel()
 	var model template
 	var dto templateDTO
-	cfg, err := NewConfigBuilder(namingDB(), "templates", &model, &dto).
-		AddSortable(&model.ID, &model.Title).
-		AddSearchable(&model.Title).
-		AddFilterable(&model.ID).
-		AddFilterable(&model.Title, paginate.OpILike).
-		MapField(&dto.ID, &model.ID).
-		MapField(&dto.Title, &model.Title).
-		AddDefaultSort(&model.CreatedAt, paginate.Desc).
-		Build()
+	b := NewBuilder(namingDB(), "templates", &model, &dto)
+	id := b.Field(&dto.ID, &model.ID)
+	b.Field(&dto.Title, &model.Title).Sortable().Searchable().Filter(paginate.OpILike)
+	b.Field(&dto.Created, &model.CreatedAt).Type(paginate.Date).Filter(paginate.OpEq, paginate.OpBtw, paginate.OpBtw)
+	// A field builder keeps working after more fields are added.
+	id.Sortable().Filter()
+	b.DefaultSort(&dto.Created, paginate.Desc)
+	cfg, err := b.Config()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(cfg.SortableColumns, []string{"templates.id", "templates.title"}) {
-		t.Fatalf("sortable: %v", cfg.SortableColumns)
+	want := []paginate.Field{
+		{Name: "id", Column: "templates.id", Type: paginate.Text, Sortable: true, Filter: []paginate.Operator{paginate.OpEq}, NotNull: true},
+		{Name: "title", Column: "templates.title", Type: paginate.Text, Sortable: true, Searchable: true, Filter: []paginate.Operator{paginate.OpEq, paginate.OpILike}},
+		{Name: "createdAt", Column: "templates.created_at", Type: paginate.Date, Filter: []paginate.Operator{paginate.OpEq, paginate.OpBtw}},
 	}
-	if !reflect.DeepEqual(cfg.FieldColumns, map[string]string{"id": "templates.id", "title": "templates.title"}) {
-		t.Fatalf("fields: %v", cfg.FieldColumns)
+	if !reflect.DeepEqual(cfg.Fields, want) {
+		t.Fatalf("fields:\nwant %+v\ngot  %+v", want, cfg.Fields)
 	}
-	// No operators means $eq only, not "not filterable".
-	if operators, ok := cfg.FilterableColumns["templates.id"]; !ok || operators == nil || len(operators) != 0 {
-		t.Fatalf("filterable id: %v %v", operators, ok)
+	if !reflect.DeepEqual(cfg.DefaultSort, []paginate.Sort{{Field: "createdAt", Order: paginate.Desc}}) || cfg.TieBreak != "templates.id" {
+		t.Fatalf("default sort %v, tie-break %q", cfg.DefaultSort, cfg.TieBreak)
 	}
-	if cfg.TieBreakColumn != "templates.id" {
-		t.Fatalf("tie-break: %q", cfg.TieBreakColumn)
-	}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("valid config: %v", err)
+	if _, err := paginate.Compile(cfg); err != nil {
+		t.Fatalf("the config must compile: %v", err)
 	}
 }
 
@@ -219,22 +216,22 @@ func TestBuilderSkipsWhatItCannotResolve(t *testing.T) {
 	t.Parallel()
 	var model template
 	var dto templateDTO
-	cfg, err := NewConfigBuilder(namingDB(), "templates", &model, &dto).
-		AddSortable(&model.Title, &model.Author).
-		MapField(&dto.Title, &model.Title).
-		Build()
+	b := NewBuilder(namingDB(), "templates", &model, &dto)
+	b.Field(&dto.Title, &model.Title).Sortable()
+	b.Field(&dto.Author.Name, &model.Author).Sortable().Searchable()
+	cfg, err := b.Config()
 	if err == nil || !strings.Contains(err.Error(), "field Author is not a column") {
 		t.Fatalf("want the unresolved field reported, got %v", err)
 	}
-	if !reflect.DeepEqual(cfg.SortableColumns, []string{"templates.title"}) {
-		t.Fatalf("unresolved fields must be left out: %v", cfg.SortableColumns)
+	if len(cfg.Fields) != 1 || cfg.Fields[0].Name != "title" {
+		t.Fatalf("unresolved fields must be left out: %+v", cfg.Fields)
 	}
 }
 
 func TestBuilderWithoutDB(t *testing.T) {
 	t.Parallel()
 	var model template
-	b := NewConfigBuilder(nil, "templates", &model, nil)
+	b := NewBuilder(nil, "templates", &model, nil)
 	if got := b.Column(&model.Title); got != "" {
 		t.Fatalf("want no column, got %q", got)
 	}
@@ -249,44 +246,43 @@ func TestBuilderTieBreakAndDefaultSortOrder(t *testing.T) {
 		t.Parallel()
 		var model builderModel
 		var dto builderDTO
-		cfg, err := NewConfigBuilder(namingDB(), "things", &model, &dto).
-			AddSortable(&model.Score, &model.CreatedAt).
-			AddDefaultSort(&model.Score, paginate.Desc).
-			AddDefaultSort(&model.CreatedAt, paginate.Desc).
-			AddDefaultSort(&model.Score, paginate.Asc).
-			Build()
+		b := NewBuilder(namingDB(), "things", &model, &dto)
+		b.Field(&dto.Score, &model.Score).Sortable()
+		b.Field(&dto.CreatedAt, &model.CreatedAt).Sortable()
+		b.DefaultSort(&dto.Score, paginate.Desc).DefaultSort(&dto.CreatedAt, paginate.Asc)
+		cfg, err := b.Config()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if cfg.TieBreakColumn != "things.id" {
-			t.Fatalf("want things.id, got %q", cfg.TieBreakColumn)
+		if cfg.TieBreak != "things.id" {
+			t.Fatalf("want things.id, got %q", cfg.TieBreak)
 		}
-		if want := []string{"things.score", "things.created_at"}; !reflect.DeepEqual(cfg.DefaultSortKeys, want) {
-			t.Fatalf("want %v, got %v", want, cfg.DefaultSortKeys)
+		if want := []paginate.Sort{{Field: "score", Order: paginate.Desc}, {Field: "createdAt", Order: paginate.Asc}}; !reflect.DeepEqual(cfg.DefaultSort, want) {
+			t.Fatalf("want %v, got %v", want, cfg.DefaultSort)
 		}
-		if cfg.DefaultSortBy["things.score"] != paginate.Asc {
-			t.Fatalf("a repeated AddDefaultSort must overwrite the order, got %v", cfg.DefaultSortBy)
+		if cfg.Fields[0].Type.String() != "number" || cfg.Fields[1].Type.String() != "int" {
+			t.Fatalf("types from the model: %v %v", cfg.Fields[0].Type, cfg.Fields[1].Type)
 		}
 	})
 	t.Run("composite primary key: no tie-breaker", func(t *testing.T) {
 		t.Parallel()
 		var model builderCompositeModel
 		var dto builderDTO
-		cfg, _ := NewConfigBuilder(namingDB(), "things", &model, &dto).AddSortable(&model.Score).Build()
-		if cfg.TieBreakColumn != "" {
-			t.Fatalf("want no tie-breaker, got %q", cfg.TieBreakColumn)
+		cfg, _ := NewBuilder(namingDB(), "things", &model, &dto).Config()
+		if cfg.TieBreak != "" {
+			t.Fatalf("want no tie-breaker, got %q", cfg.TieBreak)
 		}
 	})
 	t.Run("explicit override and opt-out", func(t *testing.T) {
 		t.Parallel()
 		var model builderModel
 		var dto builderDTO
-		builder := NewConfigBuilder(namingDB(), "things", &model, &dto).AddSortable(&model.Score)
-		if cfg, _ := builder.WithTieBreak(&model.CreatedAt).Build(); cfg.TieBreakColumn != "things.created_at" {
-			t.Fatalf("want things.created_at, got %q", cfg.TieBreakColumn)
+		b := NewBuilder(namingDB(), "things", &model, &dto)
+		if cfg, _ := b.TieBreak(&model.CreatedAt).Config(); cfg.TieBreak != "things.created_at" {
+			t.Fatalf("want things.created_at, got %q", cfg.TieBreak)
 		}
-		if cfg, _ := builder.WithoutTieBreak().Build(); cfg.TieBreakColumn != "" {
-			t.Fatalf("want empty, got %q", cfg.TieBreakColumn)
+		if cfg, _ := b.WithoutTieBreak().Config(); cfg.TieBreak != "" {
+			t.Fatalf("want empty, got %q", cfg.TieBreak)
 		}
 	})
 }
