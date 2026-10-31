@@ -180,6 +180,26 @@ schema (naming strategy, `embedded` structs with a prefix), takes the primary ke
 tie-breaker when no field is tagged `unique`, and sets `NotNull` on the columns GORM knows as `not
 null` and on primary keys.
 
+Tags and code describe one endpoint together. `ConfigOf` returns a plain `Config`: code changes the
+fields tags cannot describe and adds others, and `Compile` checks the result as a whole.
+
+```go
+cfg, err := paginate.ConfigOf[Product]("products")
+if err != nil {
+	return err
+}
+cfg.Field("status").Type = paginate.Enum(catalog.Statuses...) // values from Go constants
+cfg.Fields = append(cfg.Fields, paginate.Field{               // a joined column
+	Name: "brand", Column: "brands.name", Sortable: true, Searchable: true,
+})
+cfg.DefaultSort = []paginate.Sort{{Field: "releasedAt", Order: paginate.Desc}}
+products := paginate.MustCompile(cfg)
+```
+
+`cfg.Field` returns nil for a name the config does not have, so a misspelled name panics at
+startup. A field appended under a name the tags already gave is a `Compile` error, not an
+override: change the existing field through `cfg.Field`.
+
 ## Fields from pointers
 
 `gormx.NewBuilder` builds fields from pointers to the fields of a GORM model and an API type:
@@ -200,6 +220,19 @@ cfg, err := b.Config()
 The tie-breaker is the model's primary key when it is one column; `b.TieBreak` and
 `b.WithoutTieBreak` change it. A pointer the builder cannot resolve is left out and reported by
 `Config`. See [the GORM builder](use-cases/gorm-builder.md).
+
+## Tags, pointers or code
+
+| The fields from | Suit |
+|---|---|
+| tags, `ConfigOf` | a type that is both the row and the API: the list answers with the model or the scanned row as is |
+| pointers, `gormx.NewBuilder` | a model that differs from the API type or must not carry API tags; a renamed field fails to compile |
+| code, `Config.Fields` | joins, aliases and SQL expressions, queries without a struct, fields that differ per endpoint |
+
+They mix: tags or pointers give the base and code adds the rest, as in
+[Fields from tags](#fields-from-tags). The settings of the endpoint rather than of its fields
+(`DefaultSort`, `Pagination`, `Count`, `Format`, the limits) are always code: one struct may serve
+several endpoints.
 
 ## Checking a config in tests
 

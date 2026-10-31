@@ -255,6 +255,33 @@ func ExampleConfigOf() {
 	// products.id
 }
 
+var productStatuses = []string{"active", "archived", "draft"}
+
+// Tags and code describe one endpoint together: ConfigOf reads the tags, code changes and adds the
+// fields tags cannot describe, and Compile checks the result as a whole.
+func ExampleConfig_Field() {
+	cfg, err := paginate.ConfigOf[product]("products")
+	if err != nil {
+		panic(err)
+	}
+	cfg.Field("status").Type = paginate.Enum(productStatuses...) // values from Go constants
+	cfg.Fields = append(cfg.Fields, paginate.Field{              // a joined column
+		Name: "brand", Column: "brands.name", Sortable: true, Searchable: true,
+	})
+	endpoint := paginate.MustCompile(cfg)
+
+	for _, field := range endpoint.Fields() {
+		fmt.Println(field.Name, field.Column, field.Type)
+	}
+	// Output:
+	// id products.id int
+	// name products.name text
+	// price products.price number
+	// status products.status enum(active|archived|draft)
+	// releasedAt products.released_at time
+	// brand brands.name any
+}
+
 // Errors carry a code and the field, and HTTPStatus picks the status to answer them with.
 func ExampleHTTPStatus() {
 	r := httptest.NewRequest(http.MethodGet, "/users?filter.age=$gte:old", nil)

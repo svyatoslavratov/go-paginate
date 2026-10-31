@@ -191,6 +191,10 @@ type User struct {
 cfg, err := gormx.ConfigOf[User](db, "") // columns from the GORM schema; paginate.ConfigOf without GORM
 ```
 
+`ConfigOf` возвращает обычный `Config`, поэтому теги и код смешиваются: `cfg.Field("status")` меняет
+поле из тегов, `append(cfg.Fields, …)` добавляет колонки из JOIN. См.
+[теги, указатели или код](docs/configuration.md#tags-pointers-or-code).
+
 ## Как проходит запрос
 
 ```mermaid

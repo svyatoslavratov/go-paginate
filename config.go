@@ -173,3 +173,20 @@ type Config struct {
 	// into the links.
 	LinksBaseURL string
 }
+
+// Field returns the field named name, to change it in code. Fields read from tags by ConfigOf get
+// that way what tags cannot say, such as enum values from Go constants:
+//
+//	cfg, err := paginate.ConfigOf[User]("users")
+//	cfg.Field("status").Type = paginate.Enum(domain.UserStatuses...)
+//
+// It returns nil when there is no such field. The pointer points into Fields, and appending to
+// Fields may move them: take it after the appends.
+func (c *Config) Field(name string) *Field {
+	for i := range c.Fields {
+		if c.Fields[i].Name == name {
+			return &c.Fields[i]
+		}
+	}
+	return nil
+}

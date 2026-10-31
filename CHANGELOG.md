@@ -23,7 +23,8 @@ The first release, to be tagged v0.1.0.
 - Field types: `Text`, `Int`, `Number`, `Bool`, `Time`, `Date`, `UUID`, `Enum`, `ArrayOf`, and
   `TypeOf` for Go types. Values that do not fit are a 400 naming the field, before the query runs.
 - Struct tags: `paginate.ConfigOf` and `gormx.ConfigOf` read
-  `paginate:"sort;search;filter:$in;type:uuid;enum:a,b;column:x;name:y;unique"`.
+  `paginate:"sort;search;filter:$in;type:uuid;enum:a,b;column:x;name:y;unique;notnull"`, and
+  `Config.Field` finds a field by name, so code changes what the tags cannot describe.
 - `gormx.NewBuilder`: fields from pointers to model and DTO fields, embedded and
   `gorm:"embedded"` structs included.
 - Cursor (keyset) pagination: `Pagination: CursorPagination`, with nestjs-paginate's `cursor`

@@ -191,6 +191,10 @@ type User struct {
 cfg, err := gormx.ConfigOf[User](db, "") // columns from the GORM schema; paginate.ConfigOf without GORM
 ```
 
+`ConfigOf` returns a plain `Config`, so tags and code mix: `cfg.Field("status")` changes a field the
+tags gave, `append(cfg.Fields, …)` adds joined columns. See
+[tags, pointers or code](docs/configuration.md#tags-pointers-or-code).
+
 ## How a request flows
 
 ```mermaid
