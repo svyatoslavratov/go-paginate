@@ -16,9 +16,6 @@ jobs:
   test:
     name: test (Go ${{ matrix.go }}, Postgres ${{ matrix.postgres }})
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write # Codecov takes the coverage over OIDC, without a token
     strategy:
       fail-fast: false
       matrix:
@@ -60,12 +57,16 @@ jobs:
         with:
           name: coverage
           path: coverage.out
-      - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+      - name: Coverage for Coveralls
+        if: matrix.go == 'stable' && matrix.postgres == '17'
+        # The test helpers are not part of the library. Coveralls strips the module path itself.
+        run: grep -v -E '^github.com/svyatoslavratov/go-paginate/internal/(benchdata|pgtest)/' coverage.out > coverage.coveralls.out
+      - uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
         if: matrix.go == 'stable' && matrix.postgres == '17'
         with:
-          files: coverage.out
-          disable_search: true
-          use_oidc: true
+          file: coverage.coveralls.out
+          format: golang
+          fail-on-error: false
 
   lint:
     runs-on: ubuntu-latest
