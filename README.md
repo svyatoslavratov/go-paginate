@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/svyatoslavratov/go-paginate/actions/workflows/ci.yml/badge.svg)](https://github.com/svyatoslavratov/go-paginate/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/svyatoslavratov/go-paginate.svg)](https://pkg.go.dev/github.com/svyatoslavratov/go-paginate)
+[![codecov](https://codecov.io/gh/svyatoslavratov/go-paginate/graph/badge.svg)](https://codecov.io/gh/svyatoslavratov/go-paginate)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/svyatoslavratov/go-paginate/badge)](https://scorecard.dev/viewer/?uri=github.com/svyatoslavratov/go-paginate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -422,6 +423,13 @@ Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Te
 `make test`, and against a disposable Postgres with `make test-pg`; `make bench` and `make fuzz` run
 the benchmarks and the fuzz tests, `make demo-up` the demo. Report vulnerabilities privately, as
 [SECURITY.md](SECURITY.md) describes.
+
+## Acknowledgements
+
+The query language and the answers come from
+[nestjs-paginate](https://github.com/ppetzold/nestjs-paginate) by [Philipp](https://github.com/ppetzold)
+and its contributors. Thank you for designing them so well that a Go backend could simply speak them
+too.
 
 ## License
 
