@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/svyatoslavratov/go-paginate/actions/workflows/ci.yml/badge.svg)](https://github.com/svyatoslavratov/go-paginate/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/svyatoslavratov/go-paginate.svg)](https://pkg.go.dev/github.com/svyatoslavratov/go-paginate)
-[![codecov](https://codecov.io/gh/svyatoslavratov/go-paginate/graph/badge.svg)](https://codecov.io/gh/svyatoslavratov/go-paginate)
+[![Coverage Status](https://coveralls.io/repos/github/svyatoslavratov/go-paginate/badge.svg?branch=main)](https://coveralls.io/github/svyatoslavratov/go-paginate?branch=main)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/svyatoslavratov/go-paginate/badge)](https://scorecard.dev/viewer/?uri=github.com/svyatoslavratov/go-paginate)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16119/badge)](https://www.bestpractices.dev/projects/16119)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
