@@ -7,7 +7,9 @@ the API; the changelog says how to upgrade.
 
 ## [Unreleased]
 
-The first release, to be tagged v0.1.0.
+## [0.1.0] - 2026-10-31
+
+The first release.
 
 ### Added
 
@@ -50,4 +52,5 @@ The first release, to be tagged v0.1.0.
 - Fuzz tests of the parsers and cursors, benchmarks against hand-written code, and CI on Postgres
   13 to 18 with gorelease checks of the API.
 
-[Unreleased]: https://github.com/svyatoslavratov/go-paginate/commits/main
+[Unreleased]: https://github.com/svyatoslavratov/go-paginate/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/svyatoslavratov/go-paginate/releases/tag/v0.1.0
