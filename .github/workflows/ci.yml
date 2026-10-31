@@ -59,11 +59,8 @@ jobs:
           path: coverage.out
       - name: Coverage for Coveralls
         if: matrix.go == 'stable' && matrix.postgres == '17'
-        # Coveralls reads the file names as they are: make them paths in the repository, and leave
-        # the test helpers out.
-        run: |
-          grep -v -E '^github.com/svyatoslavratov/go-paginate/internal/(benchdata|pgtest)/' coverage.out \
-            | sed 's|^github.com/svyatoslavratov/go-paginate/||' > coverage.coveralls.out
+        # The test helpers are not part of the library. Coveralls strips the module path itself.
+        run: grep -v -E '^github.com/svyatoslavratov/go-paginate/internal/(benchdata|pgtest)/' coverage.out > coverage.coveralls.out
       - uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
         if: matrix.go == 'stable' && matrix.postgres == '17'
         with:
