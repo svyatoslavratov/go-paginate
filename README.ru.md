@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/svyatoslavratov/go-paginate/actions/workflows/ci.yml/badge.svg)](https://github.com/svyatoslavratov/go-paginate/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/svyatoslavratov/go-paginate.svg)](https://pkg.go.dev/github.com/svyatoslavratov/go-paginate)
+[![codecov](https://codecov.io/gh/svyatoslavratov/go-paginate/graph/badge.svg)](https://codecov.io/gh/svyatoslavratov/go-paginate)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/svyatoslavratov/go-paginate/badge)](https://scorecard.dev/viewer/?uri=github.com/svyatoslavratov/go-paginate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -424,6 +425,12 @@ writeJSON(w, http.StatusOK, paginate.Map(page, toUserDTO))
 Issues и pull requests приветствуются, см. [CONTRIBUTING.md](CONTRIBUTING.md). Тесты: `make test`,
 с одноразовым Postgres: `make test-pg`; бенчмарки и фазз-тесты: `make bench` и `make fuzz`, демо:
 `make demo-up`. Об уязвимостях сообщайте закрыто, как описано в [SECURITY.md](SECURITY.md).
+
+## Благодарности
+
+Язык запросов и формат ответов взяты из [nestjs-paginate](https://github.com/ppetzold/nestjs-paginate),
+который создали [Philipp](https://github.com/ppetzold) и контрибьюторы. Спасибо им: всё продумано так
+хорошо, что Go-бэкенду осталось просто заговорить на том же языке.
 
 ## Лицензия
 

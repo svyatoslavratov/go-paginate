@@ -16,6 +16,9 @@ jobs:
   test:
     name: test (Go ${{ matrix.go }}, Postgres ${{ matrix.postgres }})
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Codecov takes the coverage over OIDC, without a token
     strategy:
       fail-fast: false
       matrix:
@@ -57,6 +60,12 @@ jobs:
         with:
           name: coverage
           path: coverage.out
+      - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        if: matrix.go == 'stable' && matrix.postgres == '17'
+        with:
+          files: coverage.out
+          disable_search: true
+          use_oidc: true
 
   lint:
     runs-on: ubuntu-latest

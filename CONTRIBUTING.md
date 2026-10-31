@@ -5,6 +5,7 @@ welcome.
 
 ## Before you start
 
+- For a question or an idea, start a [discussion](https://github.com/svyatoslavratov/go-paginate/discussions).
 - For a bug, open an issue with the query string, the config and what you expected. For a security
   problem, follow [SECURITY.md](SECURITY.md) instead.
 - For a larger change (a new operator, a new executor, a change of the answer), open an issue first,
