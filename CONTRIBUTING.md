@@ -89,3 +89,23 @@ Labels sort the pull request into the release notes ([.github/release.yml](.gith
 
 By contributing you agree that your contribution is licensed under the [MIT License](LICENSE) of
 the project, and that you follow the [code of conduct](CODE_OF_CONDUCT.md).
+
+## Releasing
+
+1. In [CHANGELOG.md](CHANGELOG.md), move the entries of `[Unreleased]` under
+   `## [X.Y.Z] - YYYY-MM-DD`, leave `[Unreleased]` empty above it, and point the links at the
+   bottom to the new tag:
+
+   ```text
+   [Unreleased]: https://github.com/svyatoslavratov/go-paginate/compare/vX.Y.Z...HEAD
+   [X.Y.Z]: https://github.com/svyatoslavratov/go-paginate/compare/vW.W.W...vX.Y.Z
+   ```
+
+   The first release links `[0.1.0]` to `releases/tag/v0.1.0` instead. Before v1, an
+   incompatible change takes the next minor version, and its entry says how to upgrade.
+2. Commit, push and wait for CI on `main`.
+3. Tag the commit and push the tag: `git tag -a vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z`.
+
+The [Release workflow](.github/workflows/release.yml) tests the tag, publishes the GitHub release
+with the changelog section followed by the merged pull requests, and asks the Go module proxy for
+the version, so that pkg.go.dev lists it.
